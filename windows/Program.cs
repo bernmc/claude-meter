@@ -395,7 +395,7 @@ static class Draw
         if (sweep < 1.5f) sweep = 1.5f;
         // Faint dark halo behind the colored arc so it separates from the
         // background whatever's behind the window.
-        using (var halo = new Pen(Color.FromArgb(45, 0, 0, 0), penW + 2)
+        using (var halo = new Pen(Color.FromArgb(80, 0, 0, 0), penW + 2.5f)
         { StartCap = LineCap.Round, EndCap = LineCap.Round })
             g.DrawArc(halo, r, -90, sweep);
         using var pen = new Pen(Sev.Of(pct), penW)

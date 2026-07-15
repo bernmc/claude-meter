@@ -380,6 +380,14 @@ struct RingGauge: View {
             ZStack {
                 Circle()
                     .stroke(Color.primary.opacity(0.16), style: StrokeStyle(lineWidth: size * 0.1, lineCap: .round))
+                // Slightly wider dark arc under the colored one — a crisp rim
+                // that separates it from whatever shows through the material.
+                Circle()
+                    .trim(from: 0, to: max(0.003, min(percent, 100) / 100))
+                    .stroke(Color.black.opacity(0.32),
+                            style: StrokeStyle(lineWidth: size * 0.1 + 2.5, lineCap: .round))
+                    .rotationEffect(.degrees(-90))
+                    .animation(.easeOut(duration: 0.6), value: percent)
                 Circle()
                     .trim(from: 0, to: max(0.003, min(percent, 100) / 100))
                     .stroke(
@@ -389,8 +397,6 @@ struct RingGauge: View {
                                         endAngle: .degrees(360 * min(percent, 100) / 100)),
                         style: StrokeStyle(lineWidth: size * 0.1, lineCap: .round))
                     .rotationEffect(.degrees(-90))
-                    // separates the arc from whatever shows through the material
-                    .shadow(color: .black.opacity(0.25), radius: 1, y: 0.5)
                     .animation(.easeOut(duration: 0.6), value: percent)
                 VStack(spacing: 0) {
                     Text("\(Int(percent.rounded()))")
@@ -663,9 +669,12 @@ struct FloatingView: View {
                 Circle().stroke(Color.primary.opacity(0.18), lineWidth: 3.5)
                 Circle()
                     .trim(from: 0, to: max(0.003, min(pct, 100) / 100))
+                    .stroke(Color.black.opacity(0.32), style: StrokeStyle(lineWidth: 5.2, lineCap: .round))
+                    .rotationEffect(.degrees(-90))
+                Circle()
+                    .trim(from: 0, to: max(0.003, min(pct, 100) / 100))
                     .stroke(Sev.color(pct), style: StrokeStyle(lineWidth: 3.5, lineCap: .round))
                     .rotationEffect(.degrees(-90))
-                    .shadow(color: .black.opacity(0.25), radius: 1, y: 0.5)
                 Text("\(Int(pct.rounded()))")
                     .font(.system(size: 11, weight: .semibold, design: .rounded))
                     .monospacedDigit()
