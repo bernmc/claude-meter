@@ -306,7 +306,7 @@ static class Fmt
             .Replace(" AM", " am").Replace(" PM", " pm");
 
     // Day-before-month for locales that write it that way (AU), month-first otherwise.
-    static string DayMonth(DateTimeOffset d)
+    public static string DayMonth(DateTimeOffset d)
     {
         var p = CultureInfo.CurrentCulture.DateTimeFormat.ShortDatePattern;
         bool dayFirst = p.IndexOf('d') < p.IndexOf('M');
@@ -701,7 +701,12 @@ class FlyoutForm : Form
         {
             gearMenuOpen = true;
             var menu = app.BuildMenu(includeRefresh: false);
-            menu.Closed += (_, _) => { gearMenuOpen = false; if (!ContainsFocus) Hide(); };
+            menu.Closed += (_, _) =>
+            {
+                gearMenuOpen = false;
+                if (!ContainsFocus) Hide();
+                BeginInvoke(menu.Dispose);   // built per click — don't leak it
+            };
             menu.Show(this, gearRect.Left, gearRect.Bottom);
         }
     }
@@ -733,6 +738,10 @@ class FloatForm : Form
         TopMost = true;
         DoubleBuffered = true;
         Opacity = 0.94;
+        // The whole surface reports HTCAPTION for dragging — without this a
+        // double-click would maximize the gauge to full screen.
+        MaximizeBox = false;
+        MinimizeBox = false;
         Win32.RoundCorners(this);
     }
 
@@ -763,8 +772,11 @@ class FloatForm : Form
     public void ShowAtSavedSpot()
     {
         Relayout();
-        var screen = Screen.PrimaryScreen!.WorkingArea;
         int x = S.FloatX, y = S.FloatY;
+        // Clamp against the monitor the gauge was saved on, not the primary —
+        // otherwise a gauge parked on a second screen snaps back on restart.
+        var screen = (x == int.MinValue ? Screen.PrimaryScreen!
+                                        : Screen.FromPoint(new Point(x, y))).WorkingArea;
         if (x == int.MinValue) { x = screen.Right - Width - L(30); y = screen.Top + L(36); }
         x = Math.Clamp(x, screen.Left, Math.Max(screen.Left, screen.Right - Width));
         y = Math.Clamp(y, screen.Top, Math.Max(screen.Top, screen.Bottom - Height));
@@ -1102,7 +1114,7 @@ static class Program
                 foreach (var l in snap.Limits)
                 {
                     var reset = l.ResetsAt is DateTimeOffset r
-                        ? r.ToLocalTime().ToString("ddd d/M ") + Fmt.Clock(r) : "—";
+                        ? Fmt.DayMonth(r) + " " + Fmt.Clock(r) : "—";
                     Console.WriteLine($"{l.Label,-22} {l.Percent,5:F1}%  resets {reset}");
                 }
             }
