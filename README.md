@@ -34,8 +34,12 @@ credentials come from).
 
 - **macOS**: macOS 14 or later; Xcode Command Line Tools to build
   (`xcode-select --install`).
-- **Windows**: Windows 10 or later; the [.NET 8 SDK](https://dotnet.microsoft.com/download/dotnet/8.0)
-  to build (`winget install Microsoft.DotNet.SDK.8`).
+- **Windows**: Windows 10 or later. To build you need the
+  [.NET 8 SDK](https://dotnet.microsoft.com/download/dotnet/8.0)
+  (`winget install Microsoft.DotNet.SDK.8`); to *run*, the standard build
+  needs the .NET 8 Desktop Runtime, while a `-Portable` build (or a
+  [Releases](https://github.com/bernmc/claude-meter/releases) exe) is fully
+  self-contained and needs nothing installed.
 
 ## Install
 
@@ -61,7 +65,12 @@ cd claude-meter\windows
 
 That compiles and installs to `%LOCALAPPDATA%\Programs\Claude Meter`, then
 launches it. No Visual Studio, no dependencies — one C# file. Add `-Portable`
-to instead produce a self-contained exe that runs on machines without .NET.
+to instead produce a self-contained exe that runs on machines without .NET
+(it targets your machine's architecture; override with `-Arch x64`/`-Arch arm64`).
+
+Prefer not to build at all? Grab the standalone exe for your architecture
+from [Releases](https://github.com/bernmc/claude-meter/releases). The exes
+are unsigned, so SmartScreen will warn on first run — "More info → Run anyway".
 
 To test the data path without the UI:
 

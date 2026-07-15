@@ -1,0 +1,36 @@
+# Tag a version (e.g. `git tag v1.1 && git push --tags`) and this builds
+# self-contained Windows exes (x64 + arm64, no .NET needed on the target)
+# and attaches them to a GitHub Release. macOS stays source-only — an
+# unsigned/un-notarized .app would be blocked by Gatekeeper anyway.
+name: release
+on:
+  push:
+    tags: ["v*"]
+
+jobs:
+  windows-exes:
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.x
+      - name: Publish self-contained exes
+        shell: pwsh
+        run: |
+          foreach ($arch in "x64", "arm64") {
+            dotnet publish windows/ClaudeMeter.csproj -c Release -r "win-$arch" `
+              --self-contained true -p:PublishSingleFile=true `
+              -p:IncludeNativeLibrariesForSelfExtract=true -o "out/$arch"
+            Copy-Item "out/$arch/Claude Meter.exe" "out/ClaudeMeter-win-$arch.exe"
+          }
+      - name: Create release with assets
+        shell: pwsh
+        run: |
+          gh release create $env:GITHUB_REF_NAME `
+            out/ClaudeMeter-win-x64.exe out/ClaudeMeter-win-arm64.exe `
+            --title "Claude Meter $env:GITHUB_REF_NAME" --generate-notes
+        env:
+          GH_TOKEN: ${{ github.token }}

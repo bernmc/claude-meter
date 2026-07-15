@@ -1,15 +1,18 @@
-# Build Claude Meter.exe from Program.cs. Usage:
+﻿# Build Claude Meter.exe from Program.cs. Usage:
 #   ./build.ps1             build only (windows/build/Claude Meter.exe)
 #   ./build.ps1 -Install    build, install to %LOCALAPPDATA%\Programs, launch
 #   ./build.ps1 -Portable   self-contained single exe (no .NET runtime needed
-#                           on the target machine; much bigger file)
-param([switch]$Install, [switch]$Portable)
+#                           on the target machine; much bigger file).
+#                           Targets this machine's architecture unless
+#                           overridden, e.g. -Portable -Arch x64
+param([switch]$Install, [switch]$Portable, [ValidateSet("x64", "arm64")][string]$Arch)
 $ErrorActionPreference = "Stop"
 Set-Location $PSScriptRoot
 
 Write-Host "Compiling…"
 if ($Portable) {
-    dotnet publish -c Release -r win-x64 --self-contained true `
+    if (-not $Arch) { $Arch = if ($env:PROCESSOR_ARCHITECTURE -eq "ARM64") { "arm64" } else { "x64" } }
+    dotnet publish -c Release -r "win-$Arch" --self-contained true `
         -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true `
         -o build
 } else {
