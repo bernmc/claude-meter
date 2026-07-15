@@ -38,7 +38,7 @@ static class Sev
     public static Color Of(double pct) => pct switch
     {
         < 50 => Color.FromArgb(56, 184, 107),
-        < 75 => Color.FromArgb(224, 178, 8),
+        < 75 => Color.FromArgb(212, 158, 5), // deep gold — bright yellow vanished on warm wallpapers
         < 90 => Color.FromArgb(245, 140, 36),
         _    => Color.FromArgb(230, 66, 54),
     };
@@ -393,6 +393,11 @@ static class Draw
         g.DrawEllipse(track, r);
         float sweep = (float)(360 * Math.Min(pct, 100) / 100);
         if (sweep < 1.5f) sweep = 1.5f;
+        // Faint dark halo behind the colored arc so it separates from the
+        // background whatever's behind the window.
+        using (var halo = new Pen(Color.FromArgb(45, 0, 0, 0), penW + 2)
+        { StartCap = LineCap.Round, EndCap = LineCap.Round })
+            g.DrawArc(halo, r, -90, sweep);
         using var pen = new Pen(Sev.Of(pct), penW)
         { StartCap = LineCap.Round, EndCap = LineCap.Round };
         g.DrawArc(pen, r, -90, sweep);

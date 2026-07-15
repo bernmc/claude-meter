@@ -36,7 +36,7 @@ enum Sev {
     static func color(_ pct: Double) -> Color {
         switch pct {
         case ..<50:  return Color(red: 0.22, green: 0.72, blue: 0.42)
-        case ..<75:  return Color(red: 0.95, green: 0.77, blue: 0.06)
+        case ..<75:  return Color(red: 0.83, green: 0.62, blue: 0.02) // deep gold — bright yellow vanished on warm wallpapers
         case ..<90:  return Color(red: 0.96, green: 0.55, blue: 0.14)
         default:     return Color(red: 0.90, green: 0.26, blue: 0.21)
         }
@@ -44,7 +44,7 @@ enum Sev {
     static func nsColor(_ pct: Double) -> NSColor {
         switch pct {
         case ..<50:  return NSColor(red: 0.22, green: 0.72, blue: 0.42, alpha: 1)
-        case ..<75:  return NSColor(red: 0.85, green: 0.68, blue: 0.00, alpha: 1)
+        case ..<75:  return NSColor(red: 0.83, green: 0.62, blue: 0.02, alpha: 1)
         case ..<90:  return NSColor(red: 0.96, green: 0.55, blue: 0.14, alpha: 1)
         default:     return NSColor(red: 0.90, green: 0.26, blue: 0.21, alpha: 1)
         }
@@ -379,7 +379,7 @@ struct RingGauge: View {
         VStack(spacing: 6) {
             ZStack {
                 Circle()
-                    .stroke(Color.primary.opacity(0.09), style: StrokeStyle(lineWidth: size * 0.1, lineCap: .round))
+                    .stroke(Color.primary.opacity(0.16), style: StrokeStyle(lineWidth: size * 0.1, lineCap: .round))
                 Circle()
                     .trim(from: 0, to: max(0.003, min(percent, 100) / 100))
                     .stroke(
@@ -389,6 +389,8 @@ struct RingGauge: View {
                                         endAngle: .degrees(360 * min(percent, 100) / 100)),
                         style: StrokeStyle(lineWidth: size * 0.1, lineCap: .round))
                     .rotationEffect(.degrees(-90))
+                    // separates the arc from whatever shows through the material
+                    .shadow(color: .black.opacity(0.25), radius: 1, y: 0.5)
                     .animation(.easeOut(duration: 0.6), value: percent)
                 VStack(spacing: 0) {
                     Text("\(Int(percent.rounded()))")
@@ -422,7 +424,7 @@ struct ScopedBar: View {
             }
             GeometryReader { geo in
                 ZStack(alignment: .leading) {
-                    Capsule().fill(Color.primary.opacity(0.09))
+                    Capsule().fill(Color.primary.opacity(0.14))
                     Capsule()
                         .fill(LinearGradient(colors: [Sev.color(entry.percent).opacity(0.6), Sev.color(entry.percent)],
                                              startPoint: .leading, endPoint: .trailing))
@@ -658,11 +660,12 @@ struct FloatingView: View {
         let pct = entry?.percent ?? 0
         VStack(spacing: 2) {
             ZStack {
-                Circle().stroke(Color.primary.opacity(0.1), lineWidth: 3.5)
+                Circle().stroke(Color.primary.opacity(0.18), lineWidth: 3.5)
                 Circle()
                     .trim(from: 0, to: max(0.003, min(pct, 100) / 100))
                     .stroke(Sev.color(pct), style: StrokeStyle(lineWidth: 3.5, lineCap: .round))
                     .rotationEffect(.degrees(-90))
+                    .shadow(color: .black.opacity(0.25), radius: 1, y: 0.5)
                 Text("\(Int(pct.rounded()))")
                     .font(.system(size: 11, weight: .semibold, design: .rounded))
                     .monospacedDigit()
