@@ -4,7 +4,9 @@ A tiny menu bar (macOS) / system tray (Windows) app that shows your **Claude
 plan usage** at a glance — the same numbers as the Claude app's
 *Settings → Usage* screen, without having to go looking for them.
 
-![Claude Meter](docs/screenshot.png)
+![Claude Meter on macOS](docs/screenshot.png)
+
+![Claude Meter on Windows](docs/screenshot-windows.png)
 
 ## Features
 
