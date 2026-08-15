@@ -120,10 +120,15 @@ enum CredentialStore {
 // MARK: - API
 
 enum APIError: LocalizedError {
-    case noCredentials, refreshFailed(String), httpError(Int), badPayload
+    case noCredentials, reauthNeeded, refreshFailed(String), httpError(Int), badPayload
+    // Errors the user must fix by signing in to Claude Code again.
+    var needsSignIn: Bool {
+        switch self { case .noCredentials, .reauthNeeded: return true; default: return false }
+    }
     var errorDescription: String? {
         switch self {
         case .noCredentials:        return "No Claude Code credentials in keychain — run `claude` and sign in once."
+        case .reauthNeeded:         return "Claude Code sign-in has expired — open Terminal, run `claude`, and sign in again."
         case .refreshFailed(let m): return "Token refresh failed: \(m)"
         case .httpError(let c):     return "Usage request failed (HTTP \(c))."
         case .badPayload:           return "Unexpected response from usage endpoint."
@@ -164,6 +169,9 @@ enum UsageAPI {
         guard code == 200,
               let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let tok = obj["access_token"] as? String else {
+            // 400/401 = invalid_grant: the refresh token was revoked or the
+            // family rotated elsewhere. Only a fresh sign-in fixes that.
+            if code == 400 || code == 401 { throw APIError.reauthNeeded }
             throw APIError.refreshFailed("HTTP \(code)")
         }
         creds.apply(accessToken: tok,
@@ -270,7 +278,7 @@ enum Notifier {
         }
     }
 
-    private static func post(title: String, body: String) {
+    static func post(title: String, body: String) {
         let center = UNUserNotificationCenter.current()
         center.requestAuthorization(options: [.alert, .sound]) { granted, _ in
             if granted {
@@ -313,6 +321,8 @@ final class UsageModel: ObservableObject {
         timer?.tolerance = 10
     }
 
+    private var notifiedSignIn = false
+
     func refresh() async {
         if refreshing { return }
         refreshing = true
@@ -322,12 +332,20 @@ final class UsageModel: ObservableObject {
             self.snapshot = snap
             self.plan = plan
             self.errorText = nil
+            self.notifiedSignIn = false
             if let s = snap.session?.percent, let w = snap.weeklyAll?.percent {
                 history.record(session: s, weekly: w)
             }
             Notifier.check(snap)
         } catch {
             self.errorText = error.localizedDescription
+            // Sign-in problems don't fix themselves — say so once, loudly,
+            // instead of failing silently in the popover.
+            if let api = error as? APIError, api.needsSignIn, !notifiedSignIn {
+                notifiedSignIn = true
+                Notifier.post(title: "Claude Meter can't fetch usage",
+                              body: error.localizedDescription)
+            }
         }
     }
 }
@@ -759,10 +777,19 @@ final class AppController: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         btn.imagePosition = .imageLeft
         let showPct = d.object(forKey: "menuBarShowPct") == nil
             ? true : d.bool(forKey: "menuBarShowPct")
-        let text = showPct ? (pct.map { " \(Int($0.rounded()))%" } ?? " –") : ""
-        btn.attributedTitle = NSAttributedString(string: text, attributes: [
-            .font: NSFont.monospacedDigitSystemFont(ofSize: 12, weight: .medium)
-        ])
+        // A broken data path (auth expired, endpoint down) shows a red "!"
+        // even with the percent hidden — errors shouldn't be invisible.
+        if model.errorText != nil, model.snapshot == nil {
+            btn.attributedTitle = NSAttributedString(string: " !", attributes: [
+                .font: NSFont.monospacedDigitSystemFont(ofSize: 12, weight: .bold),
+                .foregroundColor: NSColor.systemRed,
+            ])
+        } else {
+            let text = showPct ? (pct.map { " \(Int($0.rounded()))%" } ?? " –") : ""
+            btn.attributedTitle = NSAttributedString(string: text, attributes: [
+                .font: NSFont.monospacedDigitSystemFont(ofSize: 12, weight: .medium)
+            ])
+        }
         btn.toolTip = snap.map { s in
             s.limits.map { "\($0.label): \(Int($0.percent.rounded()))%" }
                 .joined(separator: "\n")

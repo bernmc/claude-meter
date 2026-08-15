@@ -156,7 +156,10 @@ class Creds
 
 class ApiException : Exception
 {
-    public ApiException(string message) : base(message) { }
+    // Sign-in problems don't fix themselves — callers surface them loudly.
+    public bool NeedsSignIn;
+    public ApiException(string message, bool needsSignIn = false) : base(message)
+        => NeedsSignIn = needsSignIn;
 }
 
 static class UsageAPI
@@ -187,13 +190,15 @@ static class UsageAPI
     public static async Task<(string token, string? plan)> ValidToken()
     {
         var creds = Creds.Read() ?? throw new ApiException(
-            $"No Claude Code credentials at {Creds.CredsPath} — install Claude Code on this machine and sign in once (run `claude`).");
+            $"No Claude Code credentials at {Creds.CredsPath} — install Claude Code on this machine and sign in once (run `claude`).",
+            needsSignIn: true);
         if (creds.ExpiresAt is DateTimeOffset exp && exp > DateTimeOffset.Now.AddSeconds(120) &&
             creds.AccessToken is string tok)
             return (tok, creds.Subscription);
 
         var refresh = creds.RefreshToken ?? throw new ApiException(
-            "Credentials file has no refresh token — sign in to Claude Code again.");
+            "Credentials file has no refresh token — sign in to Claude Code again.",
+            needsSignIn: true);
         var body = JsonSerializer.Serialize(new Dictionary<string, string>
         {
             ["grant_type"] = "refresh_token",
@@ -204,6 +209,10 @@ static class UsageAPI
                                          HttpMethod.Post, jsonBody: body);
         JsonObject? obj = null;
         try { obj = JsonNode.Parse(text) as JsonObject; } catch { }
+        if (code is 400 or 401)
+            throw new ApiException(
+                "Claude Code sign-in has expired — run `claude` and sign in again.",
+                needsSignIn: true);
         if (code != 200 || obj?["access_token"] is not JsonNode tokNode)
             throw new ApiException($"Token refresh failed: HTTP {code}");
         var newTok = tokNode.GetValue<string>();
@@ -419,7 +428,7 @@ static class TrayIconRenderer
 {
     [DllImport("user32.dll")] static extern bool DestroyIcon(IntPtr handle);
 
-    public static Icon Make(double? pct, bool showNumber)
+    public static Icon Make(double? pct, bool showNumber, bool error = false)
     {
         const int size = 32;
         using var bmp = new Bitmap(size, size);
@@ -443,7 +452,14 @@ static class TrayIconRenderer
                     g.DrawArc(pen, r, -90, sweep);
                 }
             }
-            if (showNumber)
+            if (error)
+            {
+                // A broken data path shows a red "!" even with the number
+                // hidden — errors shouldn't be invisible.
+                using var font = new Font("Segoe UI", 16f, FontStyle.Bold, GraphicsUnit.Pixel);
+                Draw.Centered(g, "!", font, Color.FromArgb(230, 66, 54), size / 2f, size / 2f + 0.5f);
+            }
+            else if (showNumber)
             {
                 string text = pct is double pp ? Math.Min(Math.Round(pp), 99).ToString() : "–";
                 using var font = new Font("Segoe UI", text.Length > 1 ? 13f : 15f,
@@ -972,6 +988,7 @@ class App : ApplicationContext
     }
 
     bool lastSquare = S.FloatSquare;
+    bool notifiedSignIn;
     void OnSettingsChanged()
     {
         UpdateTray();
@@ -990,12 +1007,21 @@ class App : ApplicationContext
         try
         {
             var (snap, plan) = await UsageAPI.FetchUsage();
-            Snap = snap; Plan = plan; ErrorText = null;
+            Snap = snap; Plan = plan; ErrorText = null; notifiedSignIn = false;
             if (snap.Session is LimitEntry s && snap.WeeklyAll is LimitEntry w)
                 History.Record(s.Percent, w.Percent);
             Notifier.Check(snap, tray);
         }
-        catch (ApiException ex) { ErrorText = ex.Message; }
+        catch (ApiException ex)
+        {
+            ErrorText = ex.Message;
+            if (ex.NeedsSignIn && !notifiedSignIn)
+            {
+                notifiedSignIn = true;
+                tray.ShowBalloonTip(15000, "Claude Meter can't fetch usage",
+                                    ex.Message, ToolTipIcon.Error);
+            }
+        }
         catch (Exception ex) { ErrorText = "Usage request failed: " + ex.Message; }
         finally { Refreshing = false; }
         UpdateTray();
@@ -1013,7 +1039,8 @@ class App : ApplicationContext
     void UpdateTray()
     {
         var old = tray.Icon;
-        tray.Icon = TrayIconRenderer.Make(ChosenLimit()?.Percent, S.TrayShowPct);
+        tray.Icon = TrayIconRenderer.Make(ChosenLimit()?.Percent, S.TrayShowPct,
+                                          error: Snap == null && ErrorText != null);
         old?.Dispose();
         var tip = Snap != null
             ? string.Join("\n", Snap.Limits.Select(l => $"{l.Label}: {Math.Round(l.Percent)}%"))
