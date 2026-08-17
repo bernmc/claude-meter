@@ -703,11 +703,15 @@ struct FloatingView: View {
     }
 }
 
-// NSHostingView decides per-click whether a background drag may move the
-// window, and material backgrounds can make it refuse. The gauge has no
-// interactive controls, so any click may move it — force-allow.
-final class DraggableHostingView<Content: View>: NSHostingView<Content> {
+// Window-background dragging is decided by the deepest view under the click,
+// and SwiftUI's internal views can refuse it. The gauge has no interactive
+// controls, so a transparent overlay catches every click and drives the drag
+// explicitly — no hit-testing heuristics involved.
+final class DragOverlayView: NSView {
     override var mouseDownCanMoveWindow: Bool { true }
+    override func mouseDown(with event: NSEvent) {
+        window?.performDrag(with: event)
+    }
 }
 
 // MARK: - App controller (status item, popover, floating panel)
@@ -884,11 +888,14 @@ final class AppController: NSObject, NSApplicationDelegate, NSPopoverDelegate {
 
     private func showFloatingWindow() {
         if panel == nil {
-            let hosting = DraggableHostingView(rootView: FloatingView(model: model))
+            let hosting = NSHostingView(rootView: FloatingView(model: model))
             let p = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 280, height: 64),
                             styleMask: [.borderless, .nonactivatingPanel],
                             backing: .buffered, defer: false)
             p.contentView = hosting
+            let overlay = DragOverlayView(frame: hosting.bounds)
+            overlay.autoresizingMask = [.width, .height]
+            hosting.addSubview(overlay)
             p.isOpaque = false
             p.backgroundColor = .clear
             p.level = .floating
