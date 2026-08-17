@@ -703,6 +703,13 @@ struct FloatingView: View {
     }
 }
 
+// NSHostingView decides per-click whether a background drag may move the
+// window, and material backgrounds can make it refuse. The gauge has no
+// interactive controls, so any click may move it — force-allow.
+final class DraggableHostingView<Content: View>: NSHostingView<Content> {
+    override var mouseDownCanMoveWindow: Bool { true }
+}
+
 // MARK: - App controller (status item, popover, floating panel)
 
 @MainActor
@@ -877,7 +884,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSPopoverDelegate {
 
     private func showFloatingWindow() {
         if panel == nil {
-            let hosting = NSHostingView(rootView: FloatingView(model: model))
+            let hosting = DraggableHostingView(rootView: FloatingView(model: model))
             let p = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 280, height: 64),
                             styleMask: [.borderless, .nonactivatingPanel],
                             backing: .buffered, defer: false)
