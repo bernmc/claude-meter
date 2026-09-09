@@ -302,6 +302,131 @@ enum Notifier {
     }
 }
 
+// MARK: - Status export
+
+// Writes the current usage snapshot to a JSON file on every refresh attempt
+// so other local tooling can read live numbers without touching the keychain
+// or Anthropic's endpoint itself. Never surfaces errors to the UI.
+enum StatusExporter {
+    private static let iso: ISO8601DateFormatter = {
+        let f = ISO8601DateFormatter()
+        f.timeZone = TimeZone(identifier: "UTC")
+        f.formatOptions = [.withInternetDateTime]
+        return f
+    }()
+
+    private static func isoString(_ date: Date?) -> Any {
+        guard let date else { return NSNull() }
+        return iso.string(from: date)
+    }
+
+    private static var enabled: Bool {
+        let d = UserDefaults.standard
+        return d.object(forKey: "statusExportEnabled") == nil
+            ? true : d.bool(forKey: "statusExportEnabled")
+    }
+
+    private static var exportPath: String {
+        let raw = UserDefaults.standard.string(forKey: "statusExportPath")
+            ?? "~/SynologyDrive/AI_Context/01-Projects/Claude_Toolkit/Claude_Meter/status/current.json"
+        return (raw as NSString).expandingTildeInPath
+    }
+
+    // A machine without the Synology Drive folder mounted must behave
+    // exactly as today: no export, no error, no directory creation beyond
+    // the status/ leaf.
+    private static func destinationURL() -> URL? {
+        let dest = URL(fileURLWithPath: exportPath)
+        let statusDir = dest.deletingLastPathComponent()
+        let projectDir = statusDir.deletingLastPathComponent()
+        var isDir: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: projectDir.path, isDirectory: &isDir),
+              isDir.boolValue else { return nil }
+        try? FileManager.default.createDirectory(at: statusDir, withIntermediateDirectories: true)
+        return dest
+    }
+
+    private static func limitDict(_ entry: LimitEntry?) -> Any {
+        guard let entry else { return NSNull() }
+        return ["percent": entry.percent, "resets_at": isoString(entry.resetsAt)]
+    }
+
+    private static func modelsArray(_ entries: [LimitEntry]) -> [[String: Any]] {
+        let prefix = "Week — "
+        return entries.map { e in
+            var name = e.label
+            if name.hasPrefix(prefix) { name.removeFirst(prefix.count) }
+            return ["name": name, "percent": e.percent, "resets_at": isoString(e.resetsAt)]
+        }
+    }
+
+    private static func buildDocument(snap: UsageSnapshot?, plan: String?, error: String?) -> [String: Any] {
+        [
+            "fetched_at": snap.map { isoString($0.fetchedAt) } ?? NSNull(),
+            "checked_at": isoString(Date()),
+            "plan": plan ?? NSNull(),
+            "session": limitDict(snap?.session),
+            "weekly_all": limitDict(snap?.weeklyAll),
+            "models": snap.map { modelsArray($0.scoped) } ?? [],
+            "error": error ?? NSNull(),
+        ]
+    }
+
+    static func documentForSuccess(_ snap: UsageSnapshot, plan: String?) -> [String: Any] {
+        buildDocument(snap: snap, plan: plan, error: nil)
+    }
+
+    // Keeps every prior field on failure; only error/checked_at change. Falls
+    // back to the full schema (NSNull fields, empty models) if no prior file
+    // is readable.
+    static func documentForFailure(_ message: String) -> [String: Any] {
+        if let data = try? Data(contentsOf: URL(fileURLWithPath: exportPath)),
+           var doc = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+            doc["error"] = message
+            doc["checked_at"] = isoString(Date())
+            return doc
+        }
+        return buildDocument(snap: nil, plan: nil, error: message)
+    }
+
+    static func serialize(_ doc: [String: Any]) -> String {
+        guard let data = try? JSONSerialization.data(withJSONObject: doc, options: [.prettyPrinted, .sortedKeys]),
+              let str = String(data: data, encoding: .utf8) else { return "{}" }
+        return str
+    }
+
+    // Not private: the `--status` CLI block calls this directly, bypassing
+    // the `enabled` gate (explicit invocation), while still respecting the
+    // missing-projectDir skip rule inside destinationURL().
+    static func writeToFile(_ doc: [String: Any]) {
+        guard let dest = destinationURL() else { return }
+        guard let data = try? JSONSerialization.data(withJSONObject: doc, options: [.prettyPrinted, .sortedKeys])
+        else { return }
+        let tmp = dest.deletingLastPathComponent().appendingPathComponent("current.json.tmp")
+        do {
+            try data.write(to: tmp, options: .atomic)
+            do {
+                _ = try FileManager.default.replaceItemAt(dest, withItemAt: tmp)
+            } catch {
+                try? FileManager.default.removeItem(at: dest)
+                try FileManager.default.moveItem(at: tmp, to: dest)
+            }
+        } catch {
+            // Swallowed — the exporter must never crash or surface errors.
+        }
+    }
+
+    static func exportSuccess(_ snap: UsageSnapshot, plan: String?) {
+        guard enabled else { return }
+        writeToFile(documentForSuccess(snap, plan: plan))
+    }
+
+    static func exportFailure(_ message: String) {
+        guard enabled else { return }
+        writeToFile(documentForFailure(message))
+    }
+}
+
 // MARK: - Observable model
 
 @MainActor
@@ -336,9 +461,11 @@ final class UsageModel: ObservableObject {
             if let s = snap.session?.percent, let w = snap.weeklyAll?.percent {
                 history.record(session: s, weekly: w)
             }
+            StatusExporter.exportSuccess(snap, plan: plan)
             Notifier.check(snap)
         } catch {
             self.errorText = error.localizedDescription
+            StatusExporter.exportFailure(error.localizedDescription)
             // Sign-in problems don't fix themselves — say so once, loudly,
             // instead of failing silently in the popover.
             if let api = error as? APIError, api.needsSignIn, !notifiedSignIn {
@@ -504,6 +631,7 @@ struct PopoverView: View {
     @AppStorage("menuBarMetric") private var menuBarMetric = "worst"
     @AppStorage("menuBarShowPct") private var menuBarShowPct = true
     @AppStorage("warnThreshold") private var warnThreshold = 90.0
+    @AppStorage("statusExportEnabled") private var statusExportEnabled = true
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -605,6 +733,7 @@ struct PopoverView: View {
                         Text("90%").tag(90.0)
                         Text("95%").tag(95.0)
                     }
+                    Toggle("Status file", isOn: $statusExportEnabled)
                     Divider()
                     Toggle("Launch at login", isOn: Binding(
                         get: { SMAppService.mainApp.status == .enabled },
@@ -972,6 +1101,31 @@ if CommandLine.arguments.contains("--once") {
     }
     sem.wait()
     exit(0)
+}
+
+// `--status`: one fetch, write current.json (ignoring the enabled toggle —
+// explicit invocation), print the same document to stdout so file and
+// stdout can never diverge, exit 0/1 on success/failure.
+if CommandLine.arguments.contains("--status") {
+    let sem = DispatchSemaphore(value: 0)
+    var exitCode: Int32 = 0
+    Task {
+        do {
+            let (snap, plan) = try await UsageAPI.fetchUsage()
+            let doc = StatusExporter.documentForSuccess(snap, plan: plan)
+            StatusExporter.writeToFile(doc)
+            print(StatusExporter.serialize(doc))
+            exitCode = 0
+        } catch {
+            let doc = StatusExporter.documentForFailure(error.localizedDescription)
+            StatusExporter.writeToFile(doc)
+            print(StatusExporter.serialize(doc))
+            exitCode = 1
+        }
+        sem.signal()
+    }
+    sem.wait()
+    exit(exitCode)
 }
 
 MainActor.assumeIsolated {

@@ -109,6 +109,28 @@ Anthropic endpoints above.
 > tokens rotate on use, and two copies of the same token family will sign
 > each other out.
 
+## Status file
+
+**macOS only, for now.** On every refresh attempt Claude Meter atomically
+writes the current snapshot to `~/SynologyDrive/AI_Context/01-Projects/
+Claude_Toolkit/Claude_Meter/status/current.json`, so other local tools can
+read live usage without touching the keychain or Anthropic's endpoint:
+
+```json
+{
+  "fetched_at": "2026-09-09T05:32:10Z", "checked_at": "2026-09-09T05:32:11Z",
+  "plan": "max", "error": null,
+  "session": { "percent": 41.0, "resets_at": "2026-09-09T09:00:00Z" },
+  "weekly_all": { "percent": 18.4, "resets_at": "2026-09-14T00:00:00Z" },
+  "models": [{ "name": "Fable", "percent": 12.1, "resets_at": "…" }]
+}
+```
+
+Controlled by two `defaults` keys — `statusExportPath` (string, overrides the
+path) and `statusExportEnabled` (bool, default true) — or the gear menu's
+"Status file" toggle. `--status` does a one-shot fetch, writes the file, and
+prints the same JSON to stdout.
+
 ## Disclaimer
 
 This is an **unofficial** tool, not affiliated with or endorsed by Anthropic.
