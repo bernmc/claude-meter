@@ -109,6 +109,9 @@ Anthropic endpoints above.
 > tokens rotate on use, and two copies of the same token family will sign
 > each other out.
 
+On macOS, if Claude Code gets signed out, the meter shows a red "!" and a "Sign in to
+Claude Code…" button that opens Terminal running `claude auth login`.
+
 ## Status file
 
 **macOS only, for now.** On every refresh attempt Claude Meter atomically

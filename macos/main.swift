@@ -127,8 +127,8 @@ enum APIError: LocalizedError {
     }
     var errorDescription: String? {
         switch self {
-        case .noCredentials:        return "No Claude Code credentials in keychain — run `claude` and sign in once."
-        case .reauthNeeded:         return "Claude Code sign-in has expired — open Terminal, run `claude`, and sign in again."
+        case .noCredentials:        return "Claude Code isn't signed in on this Mac. Click Sign in below, or run `claude auth login` in Terminal."
+        case .reauthNeeded:         return "Claude Code is signed out. Click Sign in below, or run `claude auth login` in Terminal."
         case .refreshFailed(let m): return "Token refresh failed: \(m)"
         case .httpError(let c):     return "Usage request failed (HTTP \(c))."
         case .badPayload:           return "Unexpected response from usage endpoint."
@@ -427,6 +427,43 @@ enum StatusExporter {
     }
 }
 
+// MARK: - Sign-in launcher
+
+// Opens Terminal on a small .command script that runs `claude auth login`.
+// Terminal (not a hidden process) because the flow may ask for a pasted code;
+// NSWorkspace.open needs no Apple Events permission.
+enum SignInLauncher {
+    static func scriptURL() -> URL {
+        FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("Claude Meter", isDirectory: true)
+            .appendingPathComponent("sign-in.command")
+    }
+
+    static let scriptBody = """
+    #!/bin/zsh -l
+    echo "Signing in to Claude Code for Claude Meter…"
+    claude auth login
+    echo
+    echo "Done. You can close this window."
+
+    """
+
+    @discardableResult
+    static func writeScript() throws -> URL {
+        let url = scriptURL()
+        try FileManager.default.createDirectory(at: url.deletingLastPathComponent(),
+                                                withIntermediateDirectories: true)
+        try scriptBody.write(to: url, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: url.path)
+        return url
+    }
+
+    static func launch() {
+        guard let url = try? writeScript() else { return }
+        NSWorkspace.shared.open(url)
+    }
+}
+
 // MARK: - Observable model
 
 @MainActor
@@ -435,8 +472,37 @@ final class UsageModel: ObservableObject {
     @Published var errorText: String?
     @Published var plan: String?
     @Published var refreshing = false
+    @Published var needsSignIn = false
+    @Published var signInLaunchedAt: Date?
     let history = HistoryStore()
     private var timer: Timer?
+    private var fastTimer: Timer?
+
+    // Opens the sign-in Terminal window, then polls every 5 s until the fetch
+    // recovers or 3 minutes pass. The 60 s timer is unaffected.
+    func startSignIn() {
+        SignInLauncher.launch()
+        let started = Date()
+        signInLaunchedAt = started
+        fastTimer?.invalidate()
+        fastTimer = Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { [weak self] _ in
+            Task { @MainActor in
+                guard let self else { return }
+                if !self.needsSignIn || Date().timeIntervalSince(started) >= 180 {
+                    self.stopFastPoll()
+                    return
+                }
+                await self.refresh()
+                if !self.needsSignIn { self.stopFastPoll() }
+            }
+        }
+    }
+
+    private func stopFastPoll() {
+        fastTimer?.invalidate()
+        fastTimer = nil
+        signInLaunchedAt = nil
+    }
 
     func start() {
         Task { await refresh() }
@@ -457,6 +523,7 @@ final class UsageModel: ObservableObject {
             self.snapshot = snap
             self.plan = plan
             self.errorText = nil
+            self.needsSignIn = false
             self.notifiedSignIn = false
             if let s = snap.session?.percent, let w = snap.weeklyAll?.percent {
                 history.record(session: s, weekly: w)
@@ -465,6 +532,7 @@ final class UsageModel: ObservableObject {
             Notifier.check(snap)
         } catch {
             self.errorText = error.localizedDescription
+            self.needsSignIn = (error as? APIError)?.needsSignIn ?? false
             StatusExporter.exportFailure(error.localizedDescription)
             // Sign-in problems don't fix themselves — say so once, loudly,
             // instead of failing silently in the popover.
@@ -626,12 +694,26 @@ struct Sparkline: View {
 struct PopoverView: View {
     @ObservedObject var model: UsageModel
     let controller: AppController
+    var staticPreview = false   // ImageRenderer can't draw the AppKit-backed gear Menu
     @AppStorage("showFloating") private var showFloating = true
     @AppStorage("floatSquare") private var floatSquare = false
     @AppStorage("menuBarMetric") private var menuBarMetric = "worst"
     @AppStorage("menuBarShowPct") private var menuBarShowPct = true
     @AppStorage("warnThreshold") private var warnThreshold = 90.0
     @AppStorage("statusExportEnabled") private var statusExportEnabled = true
+
+    // Waiting state lasts 3 minutes; the model clears signInLaunchedAt when its
+    // fast poll ends, the date check covers any lag.
+    @ViewBuilder
+    private var signInButton: some View {
+        let waiting = model.signInLaunchedAt.map { Date().timeIntervalSince($0) < 180 } ?? false
+        Button(waiting ? "Waiting for sign-in…" : "Sign in to Claude Code…") {
+            model.startSignIn()
+        }
+        .buttonStyle(.borderedProminent)
+        .controlSize(.small)
+        .disabled(waiting)
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -685,6 +767,10 @@ struct PopoverView: View {
                     .font(.system(size: 10.5))
                     .foregroundStyle(.red)
                     .fixedSize(horizontal: false, vertical: true)
+                if model.needsSignIn {
+                    signInButton
+                        .padding(.top, -4)   // 12 pt stack spacing - 4 = 8 pt gap under the text
+                }
             }
 
             Divider()
@@ -712,6 +798,9 @@ struct PopoverView: View {
                         .font(.system(size: 9.5)).foregroundStyle(.tertiary)
                 }
                 Spacer()
+                if staticPreview {
+                    Image(systemName: "gearshape").font(.system(size: 11)).frame(width: 24)
+                } else {
                 Menu {
                     Toggle("Desktop gauge", isOn: Binding(
                         get: { showFloating },
@@ -748,6 +837,7 @@ struct PopoverView: View {
                 }
                 .menuStyle(.borderlessButton)
                 .frame(width: 24)
+                }
             }
         }
         .padding(14)
@@ -982,6 +1072,10 @@ final class AppController: NSObject, NSApplicationDelegate, NSPopoverDelegate {
 
     private func showContextMenu() {
         let menu = NSMenu()
+        if model.needsSignIn {
+            menu.addItem(withTitle: "Sign in to Claude Code…", action: #selector(menuSignIn), keyEquivalent: "").target = self
+            menu.addItem(.separator())
+        }
         menu.addItem(withTitle: "Refresh now", action: #selector(menuRefresh), keyEquivalent: "r").target = self
         let floatItem = NSMenuItem(title: "Show desktop gauge", action: #selector(menuToggleFloat), keyEquivalent: "")
         floatItem.target = self
@@ -998,6 +1092,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         statusItem.menu = nil   // restore click handling
     }
 
+    @objc private func menuSignIn() { model.startSignIn() }
     @objc private func menuRefresh() { Task { await model.refresh() } }
     @objc private func menuToggleFloat() { toggleFloatingWindow() }
     @objc private func menuToggleSquare() {
@@ -1101,6 +1196,47 @@ if CommandLine.arguments.contains("--once") {
     }
     sem.wait()
     exit(0)
+}
+
+// `--preview-signin <out.png>` / `--preview-signin-waiting <out.png>`: render the
+// signed-out popover to a PNG for visual checks. No network, no keychain.
+for (flag, waiting) in [("--preview-signin", false), ("--preview-signin-waiting", true)] {
+    let args = CommandLine.arguments
+    guard let i = args.firstIndex(of: flag) else { continue }
+    guard i + 1 < args.count else { print("usage: \(flag) <out.png>"); exit(2) }
+    let out = args[i + 1]
+    MainActor.assumeIsolated {
+        _ = NSApplication.shared
+        let model = UsageModel()
+        model.errorText = APIError.reauthNeeded.errorDescription
+        model.needsSignIn = true
+        if waiting { model.signInLaunchedAt = Date() }
+        var pv = PopoverView(model: model, controller: AppController())
+        pv.staticPreview = true
+        let view = pv
+            .background(Color(nsColor: .windowBackgroundColor))
+        let renderer = ImageRenderer(content: view)
+        renderer.scale = 2
+        guard let cg = renderer.cgImage,
+              let png = NSBitmapImageRep(cgImage: cg).representation(using: .png, properties: [:])
+        else { print("render failed"); exit(1) }
+        do { try png.write(to: URL(fileURLWithPath: out)) } catch { print("write failed: \(error)"); exit(1) }
+        exit(0)
+    }
+}
+
+// `--signin-script-dryrun`: write the sign-in script, print path + contents,
+// never open it.
+if CommandLine.arguments.contains("--signin-script-dryrun") {
+    do {
+        let url = try SignInLauncher.writeScript()
+        print(url.path)
+        print(try String(contentsOf: url, encoding: .utf8), terminator: "")
+        exit(0)
+    } catch {
+        print("ERROR: \(error.localizedDescription)")
+        exit(1)
+    }
 }
 
 // `--status`: one fetch, write current.json (ignoring the enabled toggle —

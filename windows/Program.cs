@@ -7,6 +7,7 @@
 // Build with build.ps1. Single-file on purpose — same pattern as the macOS
 // version (macos/main.swift), which this mirrors section by section.
 
+using System.Diagnostics;
 using System.Drawing.Drawing2D;
 using System.Drawing.Text;
 using System.Globalization;
@@ -190,14 +191,14 @@ static class UsageAPI
     public static async Task<(string token, string? plan)> ValidToken()
     {
         var creds = Creds.Read() ?? throw new ApiException(
-            $"No Claude Code credentials at {Creds.CredsPath} — install Claude Code on this machine and sign in once (run `claude`).",
+            "Claude Code isn't signed in on this PC. Use \"Sign in to Claude Code…\" in the tray menu, or run `claude auth login` in a terminal.",
             needsSignIn: true);
         if (creds.ExpiresAt is DateTimeOffset exp && exp > DateTimeOffset.Now.AddSeconds(120) &&
             creds.AccessToken is string tok)
             return (tok, creds.Subscription);
 
         var refresh = creds.RefreshToken ?? throw new ApiException(
-            "Credentials file has no refresh token — sign in to Claude Code again.",
+            "Claude Code is signed out. Use \"Sign in to Claude Code…\" in the tray menu, or run `claude auth login` in a terminal.",
             needsSignIn: true);
         var body = JsonSerializer.Serialize(new Dictionary<string, string>
         {
@@ -211,7 +212,7 @@ static class UsageAPI
         try { obj = JsonNode.Parse(text) as JsonObject; } catch { }
         if (code is 400 or 401)
             throw new ApiException(
-                "Claude Code sign-in has expired — run `claude` and sign in again.",
+                "Claude Code is signed out. Use \"Sign in to Claude Code…\" in the tray menu, or run `claude auth login` in a terminal.",
                 needsSignIn: true);
         if (code != 200 || obj?["access_token"] is not JsonNode tokNode)
             throw new ApiException($"Token refresh failed: HTTP {code}");
@@ -941,6 +942,7 @@ class App : ApplicationContext
     public UsageSnapshot? Snap;
     public string? Plan;
     public string? ErrorText;
+    public bool NeedsSignIn;
     public bool Refreshing;
     public readonly HistoryStore History = new();
 
@@ -1007,7 +1009,7 @@ class App : ApplicationContext
         try
         {
             var (snap, plan) = await UsageAPI.FetchUsage();
-            Snap = snap; Plan = plan; ErrorText = null; notifiedSignIn = false;
+            Snap = snap; Plan = plan; ErrorText = null; NeedsSignIn = false; notifiedSignIn = false;
             if (snap.Session is LimitEntry s && snap.WeeklyAll is LimitEntry w)
                 History.Record(s.Percent, w.Percent);
             Notifier.Check(snap, tray);
@@ -1015,6 +1017,7 @@ class App : ApplicationContext
         catch (ApiException ex)
         {
             ErrorText = ex.Message;
+            NeedsSignIn = ex.NeedsSignIn;
             if (ex.NeedsSignIn && !notifiedSignIn)
             {
                 notifiedSignIn = true;
@@ -1022,11 +1025,41 @@ class App : ApplicationContext
                                     ex.Message, ToolTipIcon.Error);
             }
         }
-        catch (Exception ex) { ErrorText = "Usage request failed: " + ex.Message; }
+        catch (Exception ex) { ErrorText = "Usage request failed: " + ex.Message; NeedsSignIn = false; }
         finally { Refreshing = false; }
         UpdateTray();
         flyout.Refresh(resize: true);
         if (floatForm.Visible) { floatForm.Relayout(); }
+    }
+
+    System.Windows.Forms.Timer? signInTimer;
+
+    // Opens a console running `claude auth login`, then polls every 5 s (max 3 min)
+    // until sign-in is no longer needed. The 60 s poll is unaffected.
+    void StartSignIn()
+    {
+        try
+        {
+            Process.Start(new ProcessStartInfo("cmd.exe", "/k claude auth login") { UseShellExecute = true });
+        }
+        catch { }
+
+        signInTimer?.Stop();
+        signInTimer?.Dispose();
+        var started = Stopwatch.StartNew();
+        var timer = new System.Windows.Forms.Timer { Interval = 5_000 };
+        signInTimer = timer;
+        timer.Tick += (_, _) =>
+        {
+            RefreshNow();
+            if (!NeedsSignIn || started.Elapsed > TimeSpan.FromMinutes(3))
+            {
+                timer.Stop();
+                timer.Dispose();
+                if (ReferenceEquals(signInTimer, timer)) signInTimer = null;
+            }
+        };
+        timer.Start();
     }
 
     LimitEntry? ChosenLimit() => S.TrayMetric switch
@@ -1065,6 +1098,11 @@ class App : ApplicationContext
     public ContextMenuStrip BuildMenu(bool includeRefresh)
     {
         var menu = new ContextMenuStrip();
+        var signInItem = new ToolStripMenuItem("Sign in to Claude Code…") { Visible = false };
+        signInItem.Click += (_, _) => StartSignIn();
+        var signInSep = new ToolStripSeparator { Visible = false };
+        menu.Items.Add(signInItem);
+        menu.Items.Add(signInSep);
         if (includeRefresh) menu.Items.Add("Refresh now", null, (_, _) => RefreshNow());
 
         var floatItem = new ToolStripMenuItem("Desktop gauge") { CheckOnClick = false };
@@ -1104,6 +1142,8 @@ class App : ApplicationContext
 
         menu.Opening += (_, _) =>
         {
+            signInItem.Visible = NeedsSignIn;
+            signInSep.Visible = NeedsSignIn;
             floatItem.Checked = floatForm.Visible;
             oneLine.Checked = !S.FloatSquare; square.Checked = S.FloatSquare;
             mWorst.Checked = S.TrayMetric == "worst";
