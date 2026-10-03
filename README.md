@@ -13,16 +13,17 @@ plan usage** at a glance — the same numbers as the Claude app's
 - **Menu bar / tray**: a traffic-light ring (green → amber → red) for whichever
   limit is closest to its ceiling (configurable). On macOS the percentage sits
   next to the icon; on Windows it's drawn inside the ring.
-- **Popover / flyout** (click the icon): animated ring gauges for the 5-hour
-  session window and the weekly limit, per-model weekly bars, reset countdowns,
-  your plan badge, and a 24-hour usage sparkline.
-- **Floating desktop gauge**: a small always-on-top panel with mini gauges and
+- **Popover / flyout** (click the icon): three animated ring gauges (the 5-hour
+  session window, the weekly limit, and the per-model weekly limit), any further
+  per-model weekly bars, reset countdowns, your plan badge, and a 24-hour usage
+  sparkline.
+- **Floating desktop gauge**: a small always-on-top panel with three mini gauges and
   the reset countdown. Drag it anywhere; position is remembered. Two layouts:
   one-line or square.
 - **Usage warnings**: a notification when any limit crosses a threshold
   (80/90/95%, or off). Warns once per approach, re-arms after the reset.
 - **Configurable** from the gear menu: desktop gauge on/off and layout, which
-  limit the icon tracks, percent display on/off, warning threshold, launch
+  limit the icon tracks (worst limit, session, week, or model week), percent display on/off, warning threshold, launch
   at login.
 
 Works with any Claude subscription (Pro, Max, …) — it displays whatever

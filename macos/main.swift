@@ -28,6 +28,17 @@ struct UsageSnapshot: Equatable {
     var session: LimitEntry?   { limits.first { $0.kind == "session" } }
     var weeklyAll: LimitEntry? { limits.first { $0.kind == "weekly_all" } }
     var scoped: [LimitEntry]   { limits.filter { $0.kind == "weekly_scoped" } }
+    // The per-model weekly limit shown as the third ring (today "Fable").
+    var primaryModel: LimitEntry? { scoped.first }
+
+    // "Week — Fable" -> "Fable". Shared with StatusExporter.
+    static func modelName(_ e: LimitEntry) -> String {
+        let prefix = "Week — "
+        var name = e.label
+        if name.hasPrefix(prefix) { name.removeFirst(prefix.count) }
+        return name
+    }
+    func modelName(_ e: LimitEntry) -> String { Self.modelName(e) }
 }
 
 enum Sev {
@@ -352,11 +363,8 @@ enum StatusExporter {
     }
 
     private static func modelsArray(_ entries: [LimitEntry]) -> [[String: Any]] {
-        let prefix = "Week — "
         return entries.map { e in
-            var name = e.label
-            if name.hasPrefix(prefix) { name.removeFirst(prefix.count) }
-            return ["name": name, "percent": e.percent, "resets_at": isoString(e.resetsAt)]
+            ["name": UsageSnapshot.modelName(e), "percent": e.percent, "resets_at": isoString(e.resetsAt)]
         }
     }
 
@@ -568,6 +576,11 @@ func clockString(_ date: Date, _ f: DateFormatter) -> String {
         .replacingOccurrences(of: " PM", with: " pm")
 }
 
+// Two-line form of resetText for narrow ring columns: break at the "·".
+func twoLine(_ text: String) -> String {
+    text.replacingOccurrences(of: " · ", with: "\n")
+}
+
 func resetText(_ date: Date?) -> String {
     guard let date else { return "—" }
     let secs = date.timeIntervalSinceNow
@@ -587,6 +600,9 @@ struct RingGauge: View {
     let label: String
     let sublabel: String
     var size: CGFloat = 84
+    // Set in the three-ring row: fixes the text column width so the label stays
+    // on one line and the sublabel wraps (never ellipsises).
+    var textWidth: CGFloat? = nil
 
     var body: some View {
         VStack(spacing: 6) {
@@ -621,11 +637,28 @@ struct RingGauge: View {
                 }
             }
             .frame(width: size, height: size)
-            Text(label).font(.system(size: 11, weight: .semibold))
-            Text(sublabel)
-                .font(.system(size: 9.5))
-                .foregroundStyle(.secondary)
-                .multilineTextAlignment(.center)
+            if let textWidth {
+                Text(label).font(.system(size: 11, weight: .semibold))
+                    .lineLimit(1).minimumScaleFactor(0.75)
+                    .frame(width: textWidth)
+                // One Text per line, each shrinks slightly rather than ellipsising.
+                VStack(spacing: 1) {
+                    ForEach(Array(sublabel.components(separatedBy: "\n").enumerated()), id: \.offset) { _, line in
+                        Text(line)
+                            .font(.system(size: 9.5))
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.8)
+                    }
+                }
+                .frame(width: textWidth)
+            } else {
+                Text(label).font(.system(size: 11, weight: .semibold))
+                Text(sublabel)
+                    .font(.system(size: 9.5))
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+            }
         }
     }
 }
@@ -731,22 +764,43 @@ struct PopoverView: View {
 
             if let snap = model.snapshot {
                 TimelineView(.periodic(from: .now, by: 30)) { _ in
-                    HStack(alignment: .top, spacing: 18) {
-                        Spacer(minLength: 0)
-                        if let s = snap.session {
-                            RingGauge(percent: s.percent, label: "Session",
-                                      sublabel: resetText(s.resetsAt))
+                    if let m = snap.primaryModel {
+                        // Three rings: sublabels break at the "·" into two lines.
+                        HStack(alignment: .top, spacing: 14) {
+                            if let s = snap.session {
+                                RingGauge(percent: s.percent, label: "Session",
+                                          sublabel: twoLine(resetText(s.resetsAt)),
+                                          size: 72, textWidth: 92)
+                            }
+                            if let w = snap.weeklyAll {
+                                RingGauge(percent: w.percent, label: "Week (all)",
+                                          sublabel: twoLine(resetText(w.resetsAt)),
+                                          size: 72, textWidth: 92)
+                            }
+                            RingGauge(percent: m.percent, label: "Week (\(snap.modelName(m)))",
+                                      sublabel: twoLine(resetText(m.resetsAt)),
+                                      size: 72, textWidth: 92)
                         }
-                        if let w = snap.weeklyAll {
-                            RingGauge(percent: w.percent, label: "Week (all)",
-                                      sublabel: resetText(w.resetsAt))
+                        .frame(maxWidth: .infinity)
+                    } else {
+                        HStack(alignment: .top, spacing: 18) {
+                            Spacer(minLength: 0)
+                            if let s = snap.session {
+                                RingGauge(percent: s.percent, label: "Session",
+                                          sublabel: resetText(s.resetsAt))
+                            }
+                            if let w = snap.weeklyAll {
+                                RingGauge(percent: w.percent, label: "Week (all)",
+                                          sublabel: resetText(w.resetsAt))
+                            }
+                            Spacer(minLength: 0)
                         }
-                        Spacer(minLength: 0)
                     }
                 }
-                if !snap.scoped.isEmpty {
+                // The first model is a ring now; bars cover any further ones.
+                if snap.scoped.count > 1 {
                     VStack(spacing: 8) {
-                        ForEach(snap.scoped) { ScopedBar(entry: $0) }
+                        ForEach(Array(snap.scoped.dropFirst())) { ScopedBar(entry: $0) }
                     }
                 }
                 let hist = model.history.last24h()
@@ -814,6 +868,7 @@ struct PopoverView: View {
                         Text("Worst limit").tag("worst")
                         Text("Session (5 h)").tag("session")
                         Text("Week (all models)").tag("week")
+                        Text("Model week").tag("model")
                     }
                     Toggle("Percent in menu bar", isOn: $menuBarShowPct)
                     Picker("Warn at", selection: $warnThreshold) {
@@ -841,13 +896,15 @@ struct PopoverView: View {
             }
         }
         .padding(14)
-        .frame(width: 292)
+        .frame(width: 336)
     }
 }
 
 struct FloatingView: View {
     @ObservedObject var model: UsageModel
-    @AppStorage("floatSquare") private var square = false
+    @AppStorage("floatSquare") private var storedSquare = false
+    var forceSquare: Bool? = nil   // previews: don't depend on (or touch) user defaults
+    private var square: Bool { forceSquare ?? storedSquare }
 
     var body: some View {
         TimelineView(.periodic(from: .now, by: 30)) { _ in
@@ -872,6 +929,7 @@ struct FloatingView: View {
         HStack(spacing: 14) {
             miniRing(snap.session, "5 h")
             miniRing(snap.weeklyAll, "week")
+            if let m = snap.primaryModel { miniRing(m, snap.modelName(m).lowercased()) }
             VStack(alignment: .leading, spacing: 2) {
                 Text("Claude").font(.system(size: 10, weight: .bold))
                     .foregroundStyle(.secondary)
@@ -890,6 +948,7 @@ struct FloatingView: View {
             HStack(spacing: 16) {
                 miniRing(snap.session, "5 h")
                 miniRing(snap.weeklyAll, "week")
+                if let m = snap.primaryModel { miniRing(m, snap.modelName(m).lowercased()) }
             }
             Text(resetText(snap.session?.resetsAt))
                 .font(.system(size: 9)).foregroundStyle(.secondary)
@@ -989,7 +1048,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     }
 
     // Menu bar: colored ring icon + percent. Which limit it tracks ("worst",
-    // session, or week) and whether the % text shows are gear-menu options.
+    // session, week, or model) and whether the % text shows are gear-menu options.
     private func updateStatusButton() {
         guard let btn = statusItem.button else { return }
         let d = UserDefaults.standard
@@ -999,6 +1058,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSPopoverDelegate {
             switch d.string(forKey: "menuBarMetric") ?? "worst" {
             case "session": return snap.session
             case "week":    return snap.weeklyAll
+            case "model":   return snap.primaryModel ?? snap.limits.max { $0.percent < $1.percent }
             default:        return snap.limits.max { $0.percent < $1.percent }
             }
         }()
@@ -1159,8 +1219,8 @@ final class AppController: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         // panel collapse; fall back to known-good sizes per layout.
         if sz.width < 60 || sz.height < 30 {
             sz = UserDefaults.standard.bool(forKey: "floatSquare")
-                ? NSSize(width: 190, height: 100)
-                : NSSize(width: 290, height: 64)
+                ? NSSize(width: 240, height: 100)
+                : NSSize(width: 340, height: 64)
         }
         let topLeft = NSPoint(x: p.frame.minX, y: p.frame.maxY)
         p.setContentSize(sz)
@@ -1218,6 +1278,60 @@ for (flag, waiting) in [("--preview-signin", false), ("--preview-signin-waiting"
         let renderer = ImageRenderer(content: view)
         renderer.scale = 2
         guard let cg = renderer.cgImage,
+              let png = NSBitmapImageRep(cgImage: cg).representation(using: .png, properties: [:])
+        else { print("render failed"); exit(1) }
+        do { try png.write(to: URL(fileURLWithPath: out)) } catch { print("write failed: \(error)"); exit(1) }
+        exit(0)
+    }
+}
+
+// `--preview-popover` / `--preview-float-wide` / `--preview-float-square`
+// (+ `--preview-popover-noscoped`, the two-ring fallback) <out.png>: render the
+// views from one shared fake snapshot. No network, no keychain.
+func fakeSnapshot(withScoped: Bool = true) -> UsageSnapshot {
+    let now = Date()
+    var limits = [
+        LimitEntry(id: "sessionSession (5 h)", kind: "session", label: "Session (5 h)",
+                   percent: 52, resetsAt: now.addingTimeInterval(33 * 60), isActive: true),
+        LimitEntry(id: "weekly_allWeek — all models", kind: "weekly_all", label: "Week — all models",
+                   percent: 26, resetsAt: now.addingTimeInterval(117 * 3600), isActive: false),
+    ]
+    if withScoped {
+        limits.append(LimitEntry(id: "weekly_scopedWeek — Fable", kind: "weekly_scoped",
+                                 label: "Week — Fable", percent: 39,
+                                 resetsAt: now.addingTimeInterval(117 * 3600), isActive: false))
+    }
+    return UsageSnapshot(fetchedAt: now, limits: limits)
+}
+
+for (flag, kind) in [("--preview-popover", "popover"), ("--preview-popover-noscoped", "noscoped"),
+                     ("--preview-float-wide", "wide"), ("--preview-float-square", "square")] {
+    let args = CommandLine.arguments
+    guard let i = args.firstIndex(of: flag) else { continue }
+    guard i + 1 < args.count else { print("usage: \(flag) <out.png>"); exit(2) }
+    let out = args[i + 1]
+    MainActor.assumeIsolated {
+        _ = NSApplication.shared
+        let model = UsageModel()
+        model.snapshot = fakeSnapshot(withScoped: kind != "noscoped")
+        model.plan = "max"
+        let bg = Color(nsColor: .windowBackgroundColor)
+        let image: CGImage?
+        switch kind {
+        case "popover", "noscoped":
+            var pv = PopoverView(model: model, controller: AppController())
+            pv.staticPreview = true
+            let r = ImageRenderer(content: pv.background(bg))
+            r.scale = 2
+            image = r.cgImage
+        default:
+            var fv = FloatingView(model: model)
+            fv.forceSquare = (kind == "square")
+            let r = ImageRenderer(content: fv.padding(12).background(bg))
+            r.scale = 2
+            image = r.cgImage
+        }
+        guard let cg = image,
               let png = NSBitmapImageRep(cgImage: cg).representation(using: .png, properties: [:])
         else { print("render failed"); exit(1) }
         do { try png.write(to: URL(fileURLWithPath: out)) } catch { print("write failed: \(error)"); exit(1) }

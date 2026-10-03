@@ -30,6 +30,9 @@ class UsageSnapshot
     public LimitEntry? Session   => Limits.FirstOrDefault(l => l.Kind == "session");
     public LimitEntry? WeeklyAll => Limits.FirstOrDefault(l => l.Kind == "weekly_all");
     public List<LimitEntry> Scoped => Limits.Where(l => l.Kind == "weekly_scoped").ToList();
+    public LimitEntry? PrimaryModel => Scoped.FirstOrDefault();
+    public static string ModelName(LimitEntry e) =>
+        e.Label.StartsWith("Week — ") ? e.Label.Substring("Week — ".Length) : e.Label;
 }
 
 static class Sev
@@ -532,6 +535,8 @@ class FlyoutForm : Form
 
     float F => DeviceDpi / 96f;
     int L(double logical) => (int)Math.Round(logical * F);
+    bool ThreeRings => app.Snap?.PrimaryModel != null;
+    int FlyoutW() => L(ThreeRings ? 336 : 300);
 
     protected override CreateParams CreateParams
     {
@@ -548,7 +553,7 @@ class FlyoutForm : Form
     {
         var h = Relayout();
         var screen = Screen.FromPoint(Cursor.Position).WorkingArea;
-        int w = L(300);
+        int w = FlyoutW();
         Bounds = new Rectangle(
             Math.Clamp(Cursor.Position.X - w / 2, screen.Left + L(8), screen.Right - w - L(8)),
             Math.Clamp(Cursor.Position.Y - h - L(12), screen.Top + L(8), screen.Bottom - h - L(8)),
@@ -567,9 +572,10 @@ class FlyoutForm : Form
         y += L(18) + L(12);                                   // header
         if (app.Snap is UsageSnapshot snap)
         {
-            y += L(84 + 6 + 15 + 3) + L(28) + L(12);          // rings + labels + 2-line sublabels
-            if (snap.Scoped.Count > 0)
-                y += snap.Scoped.Count * L(28) + (snap.Scoped.Count - 1) * L(8) + L(12);
+            y += L((snap.PrimaryModel != null ? 72 : 84) + 6 + 15 + 3) + L(28) + L(12);   // rings + labels + 2-line sublabels
+            int extra = Math.Max(0, snap.Scoped.Count - 1);   // first scoped entry is the third ring
+            if (extra > 0)
+                y += extra * L(28) + (extra - 1) * L(8) + L(12);
             if (app.History.Last24h().Count >= 2)
                 y += L(34 + 3 + 12) + L(12);
         }
@@ -580,7 +586,7 @@ class FlyoutForm : Form
         if (app.ErrorText is string err)
         {
             using var f = Fnt(10.5, FontStyle.Regular);
-            var sz = g.MeasureString(err, f, L(300) - 2 * pad);
+            var sz = g.MeasureString(err, f, FlyoutW() - 2 * pad);
             y += (int)Math.Ceiling(sz.Height) + L(ShowSignIn ? 8 : 12);
             if (ShowSignIn) y += L(28) + L(12);               // sign-in button
         }
@@ -623,15 +629,27 @@ class FlyoutForm : Form
 
         if (app.Snap is UsageSnapshot snap)
         {
-            // Two big ring gauges
-            int ring = L(84);
-            float cxL = w / 2f - L(75), cxR = w / 2f + L(75);
-            if (snap.Session is LimitEntry s) RingGauge(g, s, cxL, y, ring, "Session");
-            if (snap.WeeklyAll is LimitEntry wk) RingGauge(g, wk, cxR, y, ring, "Week (all)");
+            // Big ring gauges: Session, Week (all), and the first per-model limit
+            var pm = snap.PrimaryModel;
+            int ring = L(pm != null ? 72 : 84);
+            if (pm != null)
+            {
+                float cx0 = w / 2f - L(104), cx1 = w / 2f, cx2 = w / 2f + L(104);
+                if (snap.Session is LimitEntry s) RingGauge(g, s, cx0, y, ring, "Session", L(100));
+                if (snap.WeeklyAll is LimitEntry wk) RingGauge(g, wk, cx1, y, ring, "Week (all)", L(100));
+                RingGauge(g, pm, cx2, y, ring, "Week (" + UsageSnapshot.ModelName(pm) + ")", L(100));
+            }
+            else
+            {
+                float cxL = w / 2f - L(75), cxR = w / 2f + L(75);
+                if (snap.Session is LimitEntry s) RingGauge(g, s, cxL, y, ring, "Session", L(144));
+                if (snap.WeeklyAll is LimitEntry wk) RingGauge(g, wk, cxR, y, ring, "Week (all)", L(144));
+            }
             y += ring + L(6 + 15 + 3 + 28) + L(12);
 
-            // Scoped per-model bars
-            foreach (var sc in snap.Scoped)
+            // Remaining scoped per-model bars (the first one is the third ring)
+            var barEntries = snap.Scoped.Skip(1).ToList();
+            foreach (var sc in barEntries)
             {
                 using (var f = Fnt(11, FontStyle.Regular))
                 using (var b = new SolidBrush(Theme.Fg))
@@ -652,7 +670,7 @@ class FlyoutForm : Form
                 using (var fb = new SolidBrush(Sev.Of(sc.Percent))) g.FillPath(fb, path);
                 y += L(28) + L(8);
             }
-            if (snap.Scoped.Count > 0) y += L(12) - L(8);
+            if (barEntries.Count > 0) y += L(12) - L(8);
 
             // Sparkline
             var hist = app.History.Last24h();
@@ -715,7 +733,7 @@ class FlyoutForm : Form
         }
     }
 
-    void RingGauge(Graphics g, LimitEntry entry, float cx, int top, int ring, string label)
+    void RingGauge(Graphics g, LimitEntry entry, float cx, int top, int ring, string label, int textW)
     {
         Draw.Ring(g, new RectangleF(cx - ring / 2f, top, ring, ring), ring * 0.1f, entry.Percent);
         using (var f = Fnt(25, FontStyle.Bold))
@@ -728,7 +746,7 @@ class FlyoutForm : Form
         using (var b = new SolidBrush(Theme.Fg2))
         using (var sf = new StringFormat { Alignment = StringAlignment.Center })
             g.DrawString(Fmt.ResetText(entry.ResetsAt), f, b,
-                new RectangleF(cx - L(72), top + ring + L(6 + 15 + 3), L(144), L(28)), sf);
+                new RectangleF(cx - textW / 2f, top + ring + L(6 + 15 + 3), textW, L(28)), sf);
     }
 
     void Sparkline(Graphics g, List<HistoryPoint> pts, RectangleF rect)
@@ -790,7 +808,10 @@ class FlyoutForm : Form
         if (resize)
         {
             var top = Top; var h = Relayout();
-            Bounds = new Rectangle(Left, Math.Max(Screen.FromControl(this).WorkingArea.Top, Top + Height - h), Width, h);
+            var wa = Screen.FromControl(this).WorkingArea;
+            int w = FlyoutW();
+            Bounds = new Rectangle(Math.Clamp(Left, wa.Left, Math.Max(wa.Left, wa.Right - w)),
+                                   Math.Max(wa.Top, Top + Height - h), w, h);
         }
         Invalidate();
     }
@@ -862,15 +883,16 @@ class FloatForm : Form
         using var g = CreateGraphics();
         using var f9 = Fnt(9);
         var reset = Fmt.ResetText(app.Snap?.Session?.ResetsAt);
+        int rings = app.Snap?.PrimaryModel != null ? 3 : 2;
         if (S.FloatSquare)
         {
             var textW = (int)Math.Ceiling(g.MeasureString(reset, f9).Width);
-            int w = Math.Max(L(34 + 16 + 34), textW) + L(28);
+            int w = Math.Max(L(34 * rings + 16 * (rings - 1)), textW) + L(28);
             Size = new Size(w, L(10 + 34 + 12 + 7 + 12 + 10));
         }
         else
         {
-            Size = new Size(L(14 + 34 + 14 + 34 + 14 + 140 + 14), L(66));
+            Size = new Size(L(14 + (34 + 14) * rings + 140 + 14), L(66));
         }
         Invalidate();
     }
@@ -892,11 +914,20 @@ class FloatForm : Form
         }
 
         var reset = Fmt.ResetText(snap.Session?.ResetsAt);
+        var pm = snap.PrimaryModel;
         if (S.FloatSquare)
         {
-            float cx1 = Width / 2f - L(25), cx2 = Width / 2f + L(25);
-            MiniRing(g, snap.Session, "5 h", cx1, L(10));
-            MiniRing(g, snap.WeeklyAll, "week", cx2, L(10));
+            if (pm != null)
+            {
+                MiniRing(g, snap.Session, "5 h", Width / 2f - L(50), L(10));
+                MiniRing(g, snap.WeeklyAll, "week", Width / 2f, L(10));
+                MiniRing(g, pm, UsageSnapshot.ModelName(pm).ToLowerInvariant(), Width / 2f + L(50), L(10));
+            }
+            else
+            {
+                MiniRing(g, snap.Session, "5 h", Width / 2f - L(25), L(10));
+                MiniRing(g, snap.WeeklyAll, "week", Width / 2f + L(25), L(10));
+            }
             using var f = Fnt(9);
             Draw.Centered(g, reset, f, Theme.Fg2, Width / 2f, Height - L(16));
         }
@@ -904,7 +935,9 @@ class FloatForm : Form
         {
             MiniRing(g, snap.Session, "5 h", L(14 + 17), L(10));
             MiniRing(g, snap.WeeklyAll, "week", L(14 + 34 + 14 + 17), L(10));
-            float tx = L(14 + 34 + 14 + 34 + 14);
+            if (pm != null)
+                MiniRing(g, pm, UsageSnapshot.ModelName(pm).ToLowerInvariant(), L(14 + 2 * (34 + 14) + 17), L(10));
+            float tx = L(14 + (34 + 14) * (pm != null ? 3 : 2));
             using (var f = Fnt(10, FontStyle.Bold))
             using (var b = new SolidBrush(Theme.Fg2))
                 g.DrawString("Claude", f, b, tx, L(12));
@@ -1303,6 +1336,7 @@ class App : ApplicationContext
     {
         "session" => Snap?.Session,
         "week" => Snap?.WeeklyAll,
+        "model" => Snap?.PrimaryModel ?? Snap?.Limits.OrderByDescending(l => l.Percent).FirstOrDefault(),
         _ => Snap?.Limits.OrderByDescending(l => l.Percent).FirstOrDefault(),
     };
 
@@ -1356,7 +1390,8 @@ class App : ApplicationContext
         var mWorst = new ToolStripMenuItem("Worst limit", null, (_, _) => S.TrayMetric = "worst");
         var mSession = new ToolStripMenuItem("Session (5 h)", null, (_, _) => S.TrayMetric = "session");
         var mWeek = new ToolStripMenuItem("Week (all models)", null, (_, _) => S.TrayMetric = "week");
-        metric.DropDownItems.AddRange(new ToolStripItem[] { mWorst, mSession, mWeek });
+        var mModel = new ToolStripMenuItem("Model week", null, (_, _) => S.TrayMetric = "model");
+        metric.DropDownItems.AddRange(new ToolStripItem[] { mWorst, mSession, mWeek, mModel });
 
         var pctItem = new ToolStripMenuItem("Number in tray icon");
         pctItem.Click += (_, _) => S.TrayShowPct = !S.TrayShowPct;
@@ -1390,6 +1425,7 @@ class App : ApplicationContext
             mWorst.Checked = S.TrayMetric == "worst";
             mSession.Checked = S.TrayMetric == "session";
             mWeek.Checked = S.TrayMetric == "week";
+            mModel.Checked = S.TrayMetric == "model";
             pctItem.Checked = S.TrayShowPct;
             wOff.Checked = S.WarnThreshold <= 0;
             w80.Checked = S.WarnThreshold == 80;
