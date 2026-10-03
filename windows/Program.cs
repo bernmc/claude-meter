@@ -89,7 +89,16 @@ static class S
     }
 
     public static bool ShowFloating   { get => Get("showFloating", true);  set => Set("showFloating", value); }
-    public static bool FloatSquare    { get => Get("floatSquare", false);  set => Set("floatSquare", value); }
+    // "line" | "square" | "rings". Migrates the old boolean floatSquare when floatStyle was never written.
+    public static string FloatStyle
+    {
+        get => data["floatStyle"] == null
+            ? (Get("floatSquare", false) ? "square" : "line")
+            : Get("floatStyle", "line");
+        set => Set("floatStyle", value);
+    }
+    // "week" | "session": which number is largest (top) in the Rings centre.
+    public static string RingsCentre  { get => Get("ringsCentre", "week"); set => Set("ringsCentre", value); }
     public static string TrayMetric   { get => Get("trayMetric", "worst"); set => Set("trayMetric", value); }
     public static bool TrayShowPct    { get => Get("trayShowPct", true);   set => Set("trayShowPct", value); }
     public static double WarnThreshold{ get => Get("warnThreshold", 90.0); set => Set("warnThreshold", value); }
@@ -822,6 +831,7 @@ class FlyoutForm : Form
 class FloatForm : Form
 {
     readonly App app;
+    readonly ToolTip tip = new();
 
     public FloatForm(App app)
     {
@@ -832,8 +842,9 @@ class FloatForm : Form
         TopMost = true;
         DoubleBuffered = true;
         Opacity = 0.94;
-        // The whole surface reports HTCAPTION for dragging — without this a
-        // double-click would maximize the gauge to full screen.
+        // Dragging starts from OnMouseDown (WM_NCLBUTTONDOWN) so the client area
+        // stays HTCLIENT and the tooltip sees mouse moves; no caption means a
+        // double-click can't maximize, but keep these off anyway.
         MaximizeBox = false;
         MinimizeBox = false;
         Win32.RoundCorners(this);
@@ -855,10 +866,18 @@ class FloatForm : Form
         }
     }
 
-    // Drag anywhere; save position when the drag ends.
+    // Drag anywhere: hand the left-button press to the native move loop as a
+    // caption press. WM_EXITSIZEMOVE still fires when it ends, so the position saves.
+    protected override void OnMouseDown(MouseEventArgs e)
+    {
+        base.OnMouseDown(e);
+        if (e.Button != MouseButtons.Left) return;
+        Win32.ReleaseCapture();
+        Win32.SendMessage(Handle, Win32.WM_NCLBUTTONDOWN, Win32.HTCAPTION, IntPtr.Zero);
+    }
+
     protected override void WndProc(ref Message m)
     {
-        if (m.Msg == Win32.WM_NCHITTEST) { m.Result = Win32.HTCAPTION; return; }
         if (m.Msg == Win32.WM_EXITSIZEMOVE) { S.FloatX = Left; S.FloatY = Top; }
         base.WndProc(ref m);
     }
@@ -884,17 +903,49 @@ class FloatForm : Form
         using var f9 = Fnt(9);
         var reset = Fmt.ResetText(app.Snap?.Session?.ResetsAt);
         int rings = app.Snap?.PrimaryModel != null ? 3 : 2;
-        if (S.FloatSquare)
+        var style = S.FloatStyle;
+        if (style == "rings")
         {
+            Size = new Size(L(128), L(128));
+            using var disc = new GraphicsPath();
+            disc.AddEllipse(0, 0, Width, Height);
+            var old = Region;
+            Region = new Region(disc);
+            old?.Dispose();
+        }
+        else if (style == "square")
+        {
+            var old = Region;
+            Region = null;
+            old?.Dispose();
             var textW = (int)Math.Ceiling(g.MeasureString(reset, f9).Width);
             int w = Math.Max(L(34 * rings + 16 * (rings - 1)), textW) + L(28);
             Size = new Size(w, L(10 + 34 + 12 + 7 + 12 + 10));
         }
         else
         {
+            var old = Region;
+            Region = null;
+            old?.Dispose();
             Size = new Size(L(14 + (34 + 14) * rings + 140 + 14), L(66));
         }
+        tip.SetToolTip(this, TooltipText());
         Invalidate();
+    }
+
+    // One line per limit, shown as the form's hover tooltip in every style.
+    string TooltipText()
+    {
+        var snap = app.Snap;
+        if (snap == null) return "";
+        var lines = new List<string>();
+        if (snap.Session is LimitEntry s)
+            lines.Add($"Session {Math.Round(s.Percent)}% · {Fmt.ResetText(s.ResetsAt)}");
+        if (snap.WeeklyAll is LimitEntry w)
+            lines.Add($"Week {Math.Round(w.Percent)}% · {Fmt.ResetText(w.ResetsAt)}");
+        if (snap.PrimaryModel is LimitEntry m)
+            lines.Add($"{UsageSnapshot.ModelName(m)} {Math.Round(m.Percent)}% · {Fmt.ResetText(m.ResetsAt)}");
+        return string.Join("\n", lines);
     }
 
     protected override void OnPaint(PaintEventArgs e)
@@ -903,7 +954,12 @@ class FloatForm : Form
         g.SmoothingMode = SmoothingMode.AntiAlias;
         g.TextRenderingHint = TextRenderingHint.ClearTypeGridFit;
         g.Clear(Theme.Bg);
-        using (var border = new Pen(Theme.Border)) g.DrawRectangle(border, 0, 0, Width - 1, Height - 1);
+        var style = S.FloatStyle;
+        using (var border = new Pen(Theme.Border))
+        {
+            if (style == "rings") g.DrawEllipse(border, 0.5f, 0.5f, Width - 1f, Height - 1f);
+            else g.DrawRectangle(border, 0, 0, Width - 1, Height - 1);
+        }
 
         var snap = app.Snap;
         if (snap == null)
@@ -915,7 +971,39 @@ class FloatForm : Form
 
         var reset = Fmt.ResetText(snap.Session?.ResetsAt);
         var pm = snap.PrimaryModel;
-        if (S.FloatSquare)
+        if (style == "rings")
+        {
+            float cx = Width / 2f, cy = Height / 2f;
+            float pen = L(9);
+            void R(double dia, double pct)
+            {
+                float d = L(dia);
+                Draw.Ring(g, new RectangleF(cx - d / 2f, cy - d / 2f, d, d), pen, pct);
+            }
+            double wk = snap.WeeklyAll?.Percent ?? 0, se = snap.Session?.Percent ?? 0;
+            // Top (largest) number is the week by default, the session when ringsCentre = "session".
+            bool sessionTop = S.RingsCentre == "session";
+            double top = sessionTop ? se : wk, bottom = sessionTop ? wk : se;
+            if (pm != null)
+            {
+                R(108, wk); R(84, pm.Percent); R(60, se);
+                using var f19 = Fnt(19, FontStyle.Bold);
+                using var f15 = Fnt(15, FontStyle.Bold);
+                using var f12 = Fnt(12, FontStyle.Bold);
+                Draw.Centered(g, Math.Round(top).ToString(), f19, Sev.Of(top), cx, cy - L(14));
+                Draw.Centered(g, Math.Round(pm.Percent).ToString(), f15, Sev.Of(pm.Percent), cx, cy + L(1));
+                Draw.Centered(g, Math.Round(bottom).ToString(), f12, Sev.Of(bottom), cx, cy + L(14));
+            }
+            else
+            {
+                R(108, wk); R(84, se);
+                using var f19 = Fnt(19, FontStyle.Bold);
+                using var f13 = Fnt(13, FontStyle.Bold);
+                Draw.Centered(g, Math.Round(top).ToString(), f19, Sev.Of(top), cx, cy - L(7));
+                Draw.Centered(g, Math.Round(bottom).ToString(), f13, Sev.Of(bottom), cx, cy + L(8));
+            }
+        }
+        else if (style == "square")
         {
             if (pm != null)
             {
@@ -967,8 +1055,11 @@ static class Win32
     public const int WS_EX_NOACTIVATE = 0x08000000;
     public const int WM_NCHITTEST = 0x84;
     public const int WM_EXITSIZEMOVE = 0x232;
+    public const int WM_NCLBUTTONDOWN = 0xA1;
     public static readonly IntPtr HTCAPTION = 2;
 
+    [DllImport("user32.dll")] public static extern bool ReleaseCapture();
+    [DllImport("user32.dll")] public static extern IntPtr SendMessage(IntPtr hWnd, int msg, IntPtr wParam, IntPtr lParam);
     [DllImport("dwmapi.dll")]
     static extern int DwmSetWindowAttribute(IntPtr hwnd, int attr, ref int value, int size);
     [DllImport("kernel32.dll")] public static extern bool AttachConsole(int pid);
@@ -1292,15 +1383,16 @@ class App : ApplicationContext
         if (S.ShowFloating) floatForm.ShowAtSavedSpot();
     }
 
-    bool lastSquare = S.FloatSquare;
+    string lastStyle = S.FloatStyle;
     void OnSettingsChanged()
     {
         UpdateTray();
-        if (S.FloatSquare != lastSquare)
+        if (S.FloatStyle != lastStyle)
         {
-            lastSquare = S.FloatSquare;
+            lastStyle = S.FloatStyle;
             if (floatForm.Visible) floatForm.Relayout();
         }
+        else if (floatForm.Visible) floatForm.Invalidate();   // e.g. rings-centre change
     }
 
     public async void RefreshNow()
@@ -1382,9 +1474,15 @@ class App : ApplicationContext
         floatItem.Click += (_, _) => ToggleFloating();
 
         var style = new ToolStripMenuItem("Gauge style");
-        var oneLine = new ToolStripMenuItem("One line", null, (_, _) => S.FloatSquare = false);
-        var square = new ToolStripMenuItem("Square", null, (_, _) => S.FloatSquare = true);
-        style.DropDownItems.AddRange(new ToolStripItem[] { oneLine, square });
+        var oneLine = new ToolStripMenuItem("One line", null, (_, _) => S.FloatStyle = "line");
+        var square = new ToolStripMenuItem("Square", null, (_, _) => S.FloatStyle = "square");
+        var rings = new ToolStripMenuItem("Rings", null, (_, _) => S.FloatStyle = "rings");
+        style.DropDownItems.AddRange(new ToolStripItem[] { oneLine, square, rings });
+
+        var centre = new ToolStripMenuItem("Rings centre");
+        var cWeek = new ToolStripMenuItem("Week largest", null, (_, _) => S.RingsCentre = "week");
+        var cSession = new ToolStripMenuItem("Session largest", null, (_, _) => S.RingsCentre = "session");
+        centre.DropDownItems.AddRange(new ToolStripItem[] { cWeek, cSession });
 
         var metric = new ToolStripMenuItem("Tray icon shows");
         var mWorst = new ToolStripMenuItem("Worst limit", null, (_, _) => S.TrayMetric = "worst");
@@ -1408,7 +1506,7 @@ class App : ApplicationContext
 
         menu.Items.AddRange(new ToolStripItem[]
         {
-            floatItem, style, new ToolStripSeparator(),
+            floatItem, style, centre, new ToolStripSeparator(),
             metric, pctItem, warn, new ToolStripSeparator(),
             login, new ToolStripSeparator(),
             new ToolStripMenuItem("Quit Claude Meter", null, (_, _) => Quit()),
@@ -1421,7 +1519,12 @@ class App : ApplicationContext
         menu.Opening += (_, _) =>
         {
             floatItem.Checked = floatForm.Visible;
-            oneLine.Checked = !S.FloatSquare; square.Checked = S.FloatSquare;
+            var fs = S.FloatStyle;
+            oneLine.Checked = fs != "square" && fs != "rings";
+            square.Checked = fs == "square";
+            rings.Checked = fs == "rings";
+            cWeek.Checked = S.RingsCentre != "session";
+            cSession.Checked = S.RingsCentre == "session";
             mWorst.Checked = S.TrayMetric == "worst";
             mSession.Checked = S.TrayMetric == "session";
             mWeek.Checked = S.TrayMetric == "week";

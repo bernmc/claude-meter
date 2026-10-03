@@ -18,8 +18,11 @@ plan usage** at a glance — the same numbers as the Claude app's
   per-model weekly bars, reset countdowns, your plan badge, and a 24-hour usage
   sparkline.
 - **Floating desktop gauge**: a small always-on-top panel with three mini gauges and
-  the reset countdown. Drag it anywhere; position is remembered. Two layouts:
-  one-line or square.
+  the reset countdown. Drag it anywhere; position is remembered. Three layouts:
+  one-line, square, or Apple-Watch-style concentric rings (week outside, model,
+  session inside) with the percentages stacked in the centre. Pick the layout from
+  the gear menu or the right-click menu; "Rings centre" chooses whether the week or
+  the session number is largest.
 - **Usage warnings**: a notification when any limit crosses a threshold
   (80/90/95%, or off). Warns once per approach, re-arms after the reset.
 - **Configurable** from the gear menu: desktop gauge on/off and layout, which

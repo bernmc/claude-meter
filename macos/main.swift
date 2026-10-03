@@ -41,6 +41,16 @@ struct UsageSnapshot: Equatable {
     func modelName(_ e: LimitEntry) -> String { Self.modelName(e) }
 }
 
+// Floating-gauge layout preference: "line" | "square" | "rings". Stored under
+// `floatStyle`; an absent key migrates from the older `floatSquare` bool.
+enum FloatStyle {
+    static var current: String {
+        let d = UserDefaults.standard
+        if let s = d.string(forKey: "floatStyle") { return s }
+        return d.bool(forKey: "floatSquare") ? "square" : "line"
+    }
+}
+
 enum Sev {
     // Traffic-light thresholds; API "severity" only says normal/warning so we
     // derive finer bands from the percentage.
@@ -729,7 +739,8 @@ struct PopoverView: View {
     let controller: AppController
     var staticPreview = false   // ImageRenderer can't draw the AppKit-backed gear Menu
     @AppStorage("showFloating") private var showFloating = true
-    @AppStorage("floatSquare") private var floatSquare = false
+    @AppStorage("floatStyle") private var floatStyle = FloatStyle.current
+    @AppStorage("ringsCentre") private var ringsCentre = "week"
     @AppStorage("menuBarMetric") private var menuBarMetric = "worst"
     @AppStorage("menuBarShowPct") private var menuBarShowPct = true
     @AppStorage("warnThreshold") private var warnThreshold = 90.0
@@ -859,9 +870,14 @@ struct PopoverView: View {
                     Toggle("Desktop gauge", isOn: Binding(
                         get: { showFloating },
                         set: { _ in controller.toggleFloatingWindow() }))
-                    Picker("Gauge style", selection: $floatSquare) {
-                        Text("One line").tag(false)
-                        Text("Square").tag(true)
+                    Picker("Gauge style", selection: $floatStyle) {
+                        Text("One line").tag("line")
+                        Text("Square").tag("square")
+                        Text("Rings").tag("rings")
+                    }
+                    Picker("Rings centre", selection: $ringsCentre) {
+                        Text("Week largest").tag("week")
+                        Text("Session largest").tag("session")
                     }
                     Divider()
                     Picker("Menu bar shows", selection: $menuBarMetric) {
@@ -902,26 +918,105 @@ struct PopoverView: View {
 
 struct FloatingView: View {
     @ObservedObject var model: UsageModel
-    @AppStorage("floatSquare") private var storedSquare = false
-    var forceSquare: Bool? = nil   // previews: don't depend on (or touch) user defaults
-    private var square: Bool { forceSquare ?? storedSquare }
+    @AppStorage("floatStyle") private var storedStyle = FloatStyle.current
+    @AppStorage("ringsCentre") private var storedCentre = "week"
+    var forceStyle: String? = nil   // previews: don't depend on (or touch) user defaults
+    var forceCentre: String? = nil
+    private var centre: String { forceCentre ?? storedCentre }
+    private var style: String { forceStyle ?? storedStyle }
+    // Rings sit on a circular disc; the "no data" text keeps the rounded card.
+    private var disc: Bool { style == "rings" && model.snapshot != nil }
 
-    var body: some View {
+    private var content: some View {
         TimelineView(.periodic(from: .now, by: 30)) { _ in
             Group {
                 if let snap = model.snapshot {
-                    if square { squareLayout(snap) } else { wideLayout(snap) }
+                    switch style {
+                    case "square": squareLayout(snap)
+                    case "rings":  ringsLayout(snap)
+                    default:       wideLayout(snap)
+                    }
                 } else {
                     Text(model.errorText ?? "Claude Meter…")
                         .font(.system(size: 10)).foregroundStyle(.secondary)
                         .frame(maxWidth: 180)
                 }
             }
-            .padding(.horizontal, 14).padding(.vertical, 10)
+            .padding(.horizontal, disc ? 10 : 14).padding(.vertical, 10)
         }
-        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
-        .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous)
-            .strokeBorder(Color.primary.opacity(0.12)))
+    }
+
+    // `.background(_, in:)` (not a background view) keeps the vibrancy-aware
+    // secondary/tertiary text of the original cards.
+    @ViewBuilder
+    var body: some View {
+        if disc {
+            content
+                .background(.regularMaterial, in: Circle())
+                .overlay(Circle().strokeBorder(Color.primary.opacity(0.12)))
+        } else {
+            content
+                .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+                .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    .strokeBorder(Color.primary.opacity(0.12)))
+        }
+    }
+
+    // Rings: Apple-Watch-style concentric arcs. Outer = week (all models),
+    // middle = primary per-model week, inner = session. Centre stacks the
+    // percentages in the same order. Without a per-model limit: two rings.
+    private func ringsLayout(_ snap: UsageSnapshot) -> some View {
+        let week = snap.weeklyAll?.percent ?? 0
+        let sess = snap.session?.percent ?? 0
+        let m = snap.primaryModel
+        var tip = ["Session \(Int(sess.rounded()))% · \(resetText(snap.session?.resetsAt))",
+                   "Week \(Int(week.rounded()))% · \(resetText(snap.weeklyAll?.resetsAt))"]
+        if let m { tip.append("\(snap.modelName(m)) \(Int(m.percent.rounded()))% · \(resetText(m.resetsAt))") }
+        return ZStack {
+            ringArc(week, diameter: 108)
+            if let m {
+                ringArc(m.percent, diameter: 84)
+                ringArc(sess, diameter: 60)
+            } else {
+                ringArc(sess, diameter: 84)
+            }
+            // "week" (default): week largest on top, session smallest at the
+            // bottom; "session" reverses it. Lines are cap-height tight so the
+            // stack fits the 42 pt hole inside the innermost ring.
+            let sessFirst = centre == "session"
+            let top = sessFirst ? sess : week
+            let bottom = sessFirst ? week : sess
+            VStack(spacing: 1) {
+                ringNumber(top, 19)
+                if let m { ringNumber(m.percent, 15) }
+                ringNumber(bottom, m == nil ? 13 : 12)
+            }
+        }
+        .frame(width: 108, height: 108)
+        .help(tip.joined(separator: "\n"))
+    }
+
+    // `diameter` is the ring's outer edge; the stroked path sits half a line
+    // width inside it so nothing overhangs the 108 pt frame.
+    private func ringArc(_ pct: Double, diameter: CGFloat) -> some View {
+        let t = max(0.003, min(pct, 100) / 100)
+        let d = diameter - 9
+        return ZStack {
+            Circle().stroke(Color.primary.opacity(0.11), lineWidth: 9)
+            Circle().trim(from: 0, to: t)
+                .stroke(Sev.color(pct), style: StrokeStyle(lineWidth: 9, lineCap: .round))
+                .rotationEffect(.degrees(-90))
+                .animation(.easeOut(duration: 0.6), value: pct)
+        }
+        .frame(width: d, height: d)
+    }
+
+    private func ringNumber(_ pct: Double, _ size: CGFloat) -> some View {
+        Text("\(Int(pct.rounded()))")
+            .font(.system(size: size, weight: .bold, design: .rounded))
+            .monospacedDigit()
+            .foregroundStyle(Sev.color(pct))
+            .frame(height: size * 0.70)
     }
 
     // One line: rings on the left, title + countdown on the right.
@@ -1000,7 +1095,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     private var statusItem: NSStatusItem!
     private var popover: NSPopover!
     private var panel: NSPanel?
-    private var lastSquare = UserDefaults.standard.bool(forKey: "floatSquare")
+    private var lastStyle = FloatStyle.current
     private var cancellables = Set<AnyCancellable>()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -1030,9 +1125,9 @@ final class AppController: NSObject, NSApplicationDelegate, NSPopoverDelegate {
             MainActor.assumeIsolated {
                 guard let self else { return }
                 self.updateStatusButton()
-                let sq = UserDefaults.standard.bool(forKey: "floatSquare")
-                if sq != self.lastSquare {
-                    self.lastSquare = sq
+                let st = FloatStyle.current
+                if st != self.lastStyle {
+                    self.lastStyle = st
                     DispatchQueue.main.async { self.sizeFloatingPanel() }
                 }
             }
@@ -1141,10 +1236,30 @@ final class AppController: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         floatItem.target = self
         floatItem.state = (panel?.isVisible == true) ? .on : .off
         menu.addItem(floatItem)
-        let squareItem = NSMenuItem(title: "Square gauge layout", action: #selector(menuToggleSquare), keyEquivalent: "")
-        squareItem.target = self
-        squareItem.state = UserDefaults.standard.bool(forKey: "floatSquare") ? .on : .off
-        menu.addItem(squareItem)
+        let styleItem = NSMenuItem(title: "Gauge style", action: nil, keyEquivalent: "")
+        let styleMenu = NSMenu(title: "Gauge style")
+        let current = FloatStyle.current
+        for (title, key) in [("One line", "line"), ("Square", "square"), ("Rings", "rings")] {
+            let item = NSMenuItem(title: title, action: #selector(menuSetStyle(_:)), keyEquivalent: "")
+            item.target = self
+            item.representedObject = key
+            item.state = (current == key) ? .on : .off
+            styleMenu.addItem(item)
+        }
+        styleItem.submenu = styleMenu
+        menu.addItem(styleItem)
+        let centreItem = NSMenuItem(title: "Rings centre", action: nil, keyEquivalent: "")
+        let centreMenu = NSMenu(title: "Rings centre")
+        let centreNow = UserDefaults.standard.string(forKey: "ringsCentre") ?? "week"
+        for (title, key) in [("Week largest", "week"), ("Session largest", "session")] {
+            let item = NSMenuItem(title: title, action: #selector(menuSetCentre(_:)), keyEquivalent: "")
+            item.target = self
+            item.representedObject = key
+            item.state = (centreNow == key) ? .on : .off
+            centreMenu.addItem(item)
+        }
+        centreItem.submenu = centreMenu
+        menu.addItem(centreItem)
         menu.addItem(.separator())
         menu.addItem(withTitle: "Quit Claude Meter", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         statusItem.menu = menu
@@ -1155,9 +1270,13 @@ final class AppController: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     @objc private func menuSignIn() { model.startSignIn() }
     @objc private func menuRefresh() { Task { await model.refresh() } }
     @objc private func menuToggleFloat() { toggleFloatingWindow() }
-    @objc private func menuToggleSquare() {
-        let d = UserDefaults.standard
-        d.set(!d.bool(forKey: "floatSquare"), forKey: "floatSquare")
+    @objc private func menuSetCentre(_ sender: NSMenuItem) {
+        guard let key = sender.representedObject as? String else { return }
+        UserDefaults.standard.set(key, forKey: "ringsCentre")
+    }
+    @objc private func menuSetStyle(_ sender: NSMenuItem) {
+        guard let key = sender.representedObject as? String else { return }
+        UserDefaults.standard.set(key, forKey: "floatStyle")
     }
 
     func toggleFloatingWindow() {
@@ -1218,9 +1337,11 @@ final class AppController: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         // fittingSize of a hosted TimelineView can come back 0 — never let the
         // panel collapse; fall back to known-good sizes per layout.
         if sz.width < 60 || sz.height < 30 {
-            sz = UserDefaults.standard.bool(forKey: "floatSquare")
-                ? NSSize(width: 240, height: 100)
-                : NSSize(width: 340, height: 64)
+            switch FloatStyle.current {
+            case "square": sz = NSSize(width: 240, height: 100)
+            case "rings":  sz = NSSize(width: 128, height: 128)   // 108 + 2×10
+            default:       sz = NSSize(width: 340, height: 64)
+            }
         }
         let topLeft = NSPoint(x: p.frame.minX, y: p.frame.maxY)
         p.setContentSize(sz)
@@ -1285,7 +1406,8 @@ for (flag, waiting) in [("--preview-signin", false), ("--preview-signin-waiting"
     }
 }
 
-// `--preview-popover` / `--preview-float-wide` / `--preview-float-square`
+// `--preview-popover` / `--preview-float-wide` / `--preview-float-square` /
+// `--preview-float-rings` (+ `-noscoped`, `-session`)
 // (+ `--preview-popover-noscoped`, the two-ring fallback) <out.png>: render the
 // views from one shared fake snapshot. No network, no keychain.
 func fakeSnapshot(withScoped: Bool = true) -> UsageSnapshot {
@@ -1305,7 +1427,9 @@ func fakeSnapshot(withScoped: Bool = true) -> UsageSnapshot {
 }
 
 for (flag, kind) in [("--preview-popover", "popover"), ("--preview-popover-noscoped", "noscoped"),
-                     ("--preview-float-wide", "wide"), ("--preview-float-square", "square")] {
+                     ("--preview-float-wide", "wide"), ("--preview-float-square", "square"),
+                     ("--preview-float-rings", "rings"), ("--preview-float-rings-noscoped", "rings-noscoped"),
+                     ("--preview-float-rings-session", "rings-session")] {
     let args = CommandLine.arguments
     guard let i = args.firstIndex(of: flag) else { continue }
     guard i + 1 < args.count else { print("usage: \(flag) <out.png>"); exit(2) }
@@ -1313,7 +1437,7 @@ for (flag, kind) in [("--preview-popover", "popover"), ("--preview-popover-nosco
     MainActor.assumeIsolated {
         _ = NSApplication.shared
         let model = UsageModel()
-        model.snapshot = fakeSnapshot(withScoped: kind != "noscoped")
+        model.snapshot = fakeSnapshot(withScoped: kind != "noscoped" && kind != "rings-noscoped")
         model.plan = "max"
         let bg = Color(nsColor: .windowBackgroundColor)
         let image: CGImage?
@@ -1326,7 +1450,8 @@ for (flag, kind) in [("--preview-popover", "popover"), ("--preview-popover-nosco
             image = r.cgImage
         default:
             var fv = FloatingView(model: model)
-            fv.forceSquare = (kind == "square")
+            fv.forceCentre = (kind == "rings-session") ? "session" : "week"
+            fv.forceStyle = kind.hasPrefix("rings") ? "rings" : (kind == "square" ? "square" : "line")
             let r = ImageRenderer(content: fv.padding(12).background(bg))
             r.scale = 2
             image = r.cgImage
