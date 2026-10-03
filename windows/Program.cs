@@ -209,13 +209,13 @@ static class UsageAPI
         return (await resp.Content.ReadAsStringAsync(), (int)resp.StatusCode);
     }
 
-    public static async Task<(string token, string? plan)> ValidToken()
+    public static async Task<(string token, string? plan)> ValidToken(bool forceRefresh = false)
     {
         var noCreds = $"No Claude Code credentials at {Creds.CredsPath} — install Claude Code on this machine and sign in once (run `claude`).";
         var creds = Creds.Read() ?? throw (Creds.IsAbsent()
             ? new AuthRequiredException(noCreds)
             : new ApiException(noCreds));
-        if (creds.ExpiresAt is DateTimeOffset exp && exp > DateTimeOffset.Now.AddSeconds(120) &&
+        if (!forceRefresh && creds.ExpiresAt is DateTimeOffset exp && exp > DateTimeOffset.Now.AddSeconds(120) &&
             creds.AccessToken is string tok)
             return (tok, creds.Subscription);
 
@@ -250,15 +250,25 @@ static class UsageAPI
         return (newTok, creds.Subscription);
     }
 
-    public static async Task<(UsageSnapshot snap, string? plan)> FetchUsage()
-    {
-        var (token, plan) = await ValidToken();
-        var (text, code) = await Request("https://api.anthropic.com/api/oauth/usage",
+    static Task<(string body, int status)> GetUsage(string token) =>
+        Request("https://api.anthropic.com/api/oauth/usage",
             headers: new()
             {
                 ["Authorization"] = "Bearer " + token,
                 ["anthropic-beta"] = "oauth-2025-04-20",
             });
+
+    public static async Task<(UsageSnapshot snap, string? plan)> FetchUsage()
+    {
+        var (token, plan) = await ValidToken();
+        var (text, code) = await GetUsage(token);
+        if (code == 401) // possibly revoked while the access token is unexpired: refresh once, retry once
+        {
+            (token, plan) = await ValidToken(forceRefresh: true);
+            (text, code) = await GetUsage(token);
+            if (code == 401)
+                throw new AuthRequiredException("Usage request rejected (HTTP 401) after token refresh.");
+        }
         if (code != 200) throw new ApiException($"Usage request failed (HTTP {code}).");
 
         JsonObject? obj;
