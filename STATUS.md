@@ -7,20 +7,14 @@ for its open/agreed/done; the Mac session folds it into TODO.md on every sync.
 Briefs for both machines live in `plans/`.
 
 ## Open (for the Windows PC)
-- v1.2.1-look (a04bbd0): first real update-available test — the PC on 1.2 should get a balloon
-  and "Update to v1.2.1…"; then check Rings outlines (arc edge, outlined numbers, 1-px
-  glyph drift), Gauges submenu lock, 1- and 2-gauge layouts in flyout and all float styles.
-- rings-and-update-look (c65a658, d886588): run v1.2 on Windows and check: Rings style
-  (disc edge may look jagged from the Region clip; drag still saves position; hover
-  tooltip appears; right-click on the float does nothing now, tray menu still works),
-  Rings centre option, "Check for updates…" and the auto-check toggle, the
-  "Update available" flyout row (only visible when a newer release exists), balloon
-  click routing, and `--check-update`. Fix in place; briefs in plans/.
 - status-file-win: port the macOS status/current.json export to Windows. Path decision:
   `%APPDATA%\Claude Meter\status\current.json`, defaults key `statusExportPath`, same
   JSON shape as macOS (see plans/status-export.md). No brief yet.
 
+- float-width-mac: check whether the macOS one-line float has the same trailing grey slack as Windows (see plans/v121-look-win.md Amendment 1); match the content-derived width rule (Mac session)
+
 ## Agreed (reviewed, committed, not yet pushed)
+- v121-look-win: (agreed af17548) — closes v1.2.1-look and rings-and-update-look. Found and fixed: Windows settings.json was never written (net8 serializer); DWM frame around Rings disc; float tooltip; float overhang; one-line float width + stacked time. Not fixed, by design: Rings disc edge is stair-stepped (Region clip; smooth needs a layered window); Rings centre numbers overlap the inner ring (spec in plans/rings-style-win.md — Bernard to decide); update-available path has no test override, unexercised.
 
 ## Done (pushed)
 - rings-outline + rings-select a04bbd0 (v1.2.1 tagged)
