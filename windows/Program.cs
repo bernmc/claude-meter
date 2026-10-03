@@ -1156,6 +1156,43 @@ class NotFoundDialog : Form
     }
 }
 
+// The default check glyph is an unscaled bitmap that is clipped to a fragment at >100% DPI in the
+// top-level tray strip. Draw a DPI-scaled box instead (same size on every strip), and give every
+// menu a check column of matching width.
+sealed class CheckMarginRenderer : ToolStripProfessionalRenderer
+{
+    [DllImport("user32.dll")] static extern uint GetDpiForSystem();
+
+    public static void Apply(ToolStripDropDownMenu menu)
+    {
+        int h = (int)Math.Round(16 * GetDpiForSystem() / 96.0);
+        menu.ShowImageMargin = false;
+        menu.ShowCheckMargin = true;
+        menu.ImageScalingSize = new Size(h, h);
+        // The top-level strip sizes its check-only column from a 16px bitmap, narrower than submenus; an
+        // empty image column widens the text indent to match.
+        if (menu is ContextMenuStrip) menu.ShowImageMargin = true;
+        menu.Renderer = new CheckMarginRenderer();
+    }
+
+    protected override void OnRenderItemCheck(ToolStripItemImageRenderEventArgs e)
+    {
+        var g = e.Graphics;
+        int side = (int)Math.Round(15 * GetDpiForSystem() / 96.0);
+        var box = new Rectangle(e.ImageRectangle.X, (e.Item.Height - side) / 2, side - 1, side - 1);
+        g.SmoothingMode = SmoothingMode.AntiAlias;
+        using (var fill = new SolidBrush(ColorTable.CheckBackground)) g.FillRectangle(fill, box);
+        using (var border = new Pen(ColorTable.ButtonSelectedBorder)) g.DrawRectangle(border, box);
+        using var tick = new Pen(e.Item.ForeColor, Math.Max(1.5f, side / 10f)) { StartCap = LineCap.Round, EndCap = LineCap.Round, LineJoin = LineJoin.Round };
+        g.DrawLines(tick, new[]
+        {
+            new PointF(box.X + box.Width * 0.24f, box.Y + box.Height * 0.52f),
+            new PointF(box.X + box.Width * 0.44f, box.Y + box.Height * 0.72f),
+            new PointF(box.X + box.Width * 0.78f, box.Y + box.Height * 0.30f),
+        });
+    }
+}
+
 // ───────────────────────────── App controller ─────────────────────────────
 
 class App : ApplicationContext
@@ -1292,6 +1329,7 @@ class App : ApplicationContext
     public ContextMenuStrip BuildMenu(bool includeRefresh)
     {
         var menu = new ContextMenuStrip();
+        CheckMarginRenderer.Apply(menu);
         if (includeRefresh)
         {
             menu.Items.Add("Refresh now", null, (_, _) => RefreshNow());
@@ -1332,6 +1370,10 @@ class App : ApplicationContext
             login, new ToolStripSeparator(),
             new ToolStripMenuItem("Quit Claude Meter", null, (_, _) => Quit()),
         });
+
+        // Submenus are separate drop-downs; give them the same dedicated check column.
+        foreach (var top in menu.Items.OfType<ToolStripMenuItem>())
+            if (top.DropDown is ToolStripDropDownMenu dd) CheckMarginRenderer.Apply(dd);
 
         menu.Opening += (_, _) =>
         {
