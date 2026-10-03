@@ -14,9 +14,9 @@ Briefs for both machines live in `plans/`.
 - float-width-mac: check whether the macOS one-line float has the same trailing grey slack as Windows (see plans/v121-look-win.md Amendment 1); match the content-derived width rule (Mac session)
 
 ## Agreed (reviewed, committed, not yet pushed)
-- v121-look-win: (agreed af17548) — closes v1.2.1-look and rings-and-update-look. Found and fixed: Windows settings.json was never written (net8 serializer); DWM frame around Rings disc; float tooltip; float overhang; one-line float width + stacked time. Not fixed, by design: Rings disc edge is stair-stepped (Region clip; smooth needs a layered window); Rings centre numbers overlap the inner ring (spec in plans/rings-style-win.md — Bernard to decide); update-available path has no test override, unexercised.
 
 ## Done (pushed)
+- v121-look-win: af17548 (closes v1.2.1-look, rings-and-update-look). Fixed: settings.json never written on Windows (net8 serializer); DWM frame on Rings disc; float tooltip; float overhang; one-line width + stacked time. Open by design: Rings disc stair-step (Region clip); Rings centre numbers overlap inner ring (Bernard to decide); update-available path unexercised (no test override).
 - rings-outline + rings-select a04bbd0 (v1.2.1 tagged)
 
 - rings-style-win c65a658, update-check-win d886588 (v1.2 tagged)
