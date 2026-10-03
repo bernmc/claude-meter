@@ -465,7 +465,7 @@ static class TrayIconRenderer
 {
     [DllImport("user32.dll")] static extern bool DestroyIcon(IntPtr handle);
 
-    public static Icon Make(double? pct, bool showNumber)
+    public static Icon Make(double? pct, bool showNumber, bool error = false)
     {
         const int size = 32;
         using var bmp = new Bitmap(size, size);
@@ -489,7 +489,14 @@ static class TrayIconRenderer
                     g.DrawArc(pen, r, -90, sweep);
                 }
             }
-            if (showNumber)
+            if (error)
+            {
+                // A broken data path shows a red "!" even with the number
+                // hidden — errors shouldn't be invisible.
+                using var font = new Font("Segoe UI", 16f, FontStyle.Bold, GraphicsUnit.Pixel);
+                Draw.Centered(g, "!", font, Color.FromArgb(230, 66, 54), size / 2f, size / 2f + 0.5f);
+            }
+            else if (showNumber)
             {
                 string text = pct is double pp ? Math.Min(Math.Round(pp), 99).ToString() : "–";
                 using var font = new Font("Segoe UI", text.Length > 1 ? 13f : 15f,
@@ -1302,7 +1309,8 @@ class App : ApplicationContext
     void UpdateTray()
     {
         var old = tray.Icon;
-        tray.Icon = TrayIconRenderer.Make(ChosenLimit()?.Percent, S.TrayShowPct);
+        tray.Icon = TrayIconRenderer.Make(ChosenLimit()?.Percent, S.TrayShowPct,
+                                          error: Snap == null && ErrorText != null);
         old?.Dispose();
         var tip = Snap != null
             ? string.Join("\n", Snap.Limits.Select(l => $"{l.Label}: {Math.Round(l.Percent)}%"))

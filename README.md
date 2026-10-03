@@ -85,10 +85,9 @@ To test the data path without the UI:
 
 #### Sign-in expired?
 
-On Windows the meter uses Claude Code's sign-in. If it shows "Claude Code
-sign-in has expired or been revoked", click **Sign in to Claude Code…** (tray
-menu or the flyout) — it runs `claude auth login` for you. If Claude Code isn't
-installed, run `winget install Anthropic.ClaudeCode` first.
+If the meter shows "Claude Code sign-in has expired or been revoked", click
+**Sign in to Claude Code…** in the tray menu or the flyout. If Claude Code isn't
+installed, it shows the `winget install Anthropic.ClaudeCode` command to run first.
 
 ## How it works (and what it touches)
 
@@ -115,6 +114,34 @@ Anthropic endpoints above.
 > Claude Meter on. Don't copy the credentials file between machines — refresh
 > tokens rotate on use, and two copies of the same token family will sign
 > each other out.
+
+If Claude Code gets signed out, the meter shows a red "!" and a "Sign in to
+Claude Code…" button. On macOS it opens Terminal running `claude auth login`; on
+Windows the same button (tray menu or flyout) runs `claude auth login` in a console
+and offers the `winget install Anthropic.ClaudeCode` command if Claude Code isn't
+installed.
+
+## Status file
+
+**macOS only, for now.** On every refresh attempt Claude Meter atomically
+writes the current snapshot to `~/SynologyDrive/AI_Context/01-Projects/
+Claude_Toolkit/Claude_Meter/status/current.json`, so other local tools can
+read live usage without touching the keychain or Anthropic's endpoint:
+
+```json
+{
+  "fetched_at": "2026-09-09T05:32:10Z", "checked_at": "2026-09-09T05:32:11Z",
+  "plan": "max", "error": null,
+  "session": { "percent": 41.0, "resets_at": "2026-09-09T09:00:00Z" },
+  "weekly_all": { "percent": 18.4, "resets_at": "2026-09-14T00:00:00Z" },
+  "models": [{ "name": "Fable", "percent": 12.1, "resets_at": "…" }]
+}
+```
+
+Controlled by two `defaults` keys — `statusExportPath` (string, overrides the
+path) and `statusExportEnabled` (bool, default true) — or the gear menu's
+"Status file" toggle. `--status` does a one-shot fetch, writes the file, and
+prints the same JSON to stdout.
 
 ## Disclaimer
 
