@@ -83,6 +83,13 @@ To test the data path without the UI:
 & "$env:LOCALAPPDATA\Programs\Claude Meter\Claude Meter.exe" --once
 ```
 
+#### Sign-in expired?
+
+On Windows the meter uses Claude Code's sign-in. If it shows "Claude Code
+sign-in has expired or been revoked", click **Sign in to Claude Code…** (tray
+menu or the flyout) — it runs `claude auth login` for you. If Claude Code isn't
+installed, run `winget install Anthropic.ClaudeCode` first.
+
 ## How it works (and what it touches)
 
 You should know exactly what an app near your credentials does:

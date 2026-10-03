@@ -7,6 +7,7 @@
 // Build with build.ps1. Single-file on purpose — same pattern as the macOS
 // version (macos/main.swift), which this mirrors section by section.
 
+using System.Diagnostics;
 using System.Drawing.Drawing2D;
 using System.Drawing.Text;
 using System.Globalization;
@@ -131,9 +132,26 @@ class Creds
         Blob["claudeAiOauth"] = o;
     }
 
-    public static string CredsPath = Path.Combine(
-        Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
-        ".claude", ".credentials.json");
+    // CLAUDE_METER_CREDS_PATH (testing only) replaces the default for read and write-back.
+    public static string CredsPath =
+        Environment.GetEnvironmentVariable("CLAUDE_METER_CREDS_PATH") is { Length: > 0 } overridePath
+            ? overridePath
+            : Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
+                ".claude", ".credentials.json");
+
+    // True only when the file is missing or parses without a claudeAiOauth
+    // object. A locked / half-written file is not "absent".
+    public static bool IsAbsent()
+    {
+        try
+        {
+            if (!File.Exists(CredsPath)) return true;
+            return JsonNode.Parse(File.ReadAllText(CredsPath)) is JsonObject blob &&
+                   blob["claudeAiOauth"] is not JsonObject;
+        }
+        catch { return false; }
+    }
 
     public static Creds? Read()
     {
@@ -157,6 +175,13 @@ class Creds
 class ApiException : Exception
 {
     public ApiException(string message) : base(message) { }
+}
+
+// Credentials are missing, have no refresh token, or the refresh token was
+// rejected (HTTP 400/401) — only a fresh `claude auth login` fixes this.
+class AuthRequiredException : ApiException
+{
+    public AuthRequiredException(string message) : base(message) { }
 }
 
 static class UsageAPI
@@ -186,13 +211,15 @@ static class UsageAPI
 
     public static async Task<(string token, string? plan)> ValidToken()
     {
-        var creds = Creds.Read() ?? throw new ApiException(
-            $"No Claude Code credentials at {Creds.CredsPath} — install Claude Code on this machine and sign in once (run `claude`).");
+        var noCreds = $"No Claude Code credentials at {Creds.CredsPath} — install Claude Code on this machine and sign in once (run `claude`).";
+        var creds = Creds.Read() ?? throw (Creds.IsAbsent()
+            ? new AuthRequiredException(noCreds)
+            : new ApiException(noCreds));
         if (creds.ExpiresAt is DateTimeOffset exp && exp > DateTimeOffset.Now.AddSeconds(120) &&
             creds.AccessToken is string tok)
             return (tok, creds.Subscription);
 
-        var refresh = creds.RefreshToken ?? throw new ApiException(
+        var refresh = creds.RefreshToken ?? throw new AuthRequiredException(
             "Credentials file has no refresh token — sign in to Claude Code again.");
         var body = JsonSerializer.Serialize(new Dictionary<string, string>
         {
@@ -204,6 +231,15 @@ static class UsageAPI
                                          HttpMethod.Post, jsonBody: body);
         JsonObject? obj = null;
         try { obj = JsonNode.Parse(text) as JsonObject; } catch { }
+        if (code == 400 || code == 401)
+        {
+            string? err = null, desc = null;
+            try { err = (string?)obj?["error"]; } catch { }
+            try { desc = (string?)obj?["error_description"]; } catch { }
+            var detail = string.Join(" — ", new[] { err, desc }.Where(s => !string.IsNullOrEmpty(s)));
+            throw new AuthRequiredException($"Token refresh failed: HTTP {code}" +
+                                            (detail.Length > 0 ? $" ({detail})" : ""));
+        }
         if (code != 200 || obj?["access_token"] is not JsonNode tokNode)
             throw new ApiException($"Token refresh failed: HTTP {code}");
         var newTok = tokNode.GetValue<string>();
@@ -462,8 +498,9 @@ static class TrayIconRenderer
 class FlyoutForm : Form
 {
     readonly App app;
-    Rectangle refreshRect, gaugeRect, gearRect;
+    Rectangle refreshRect, gaugeRect, gearRect, signInRect;
     bool gearMenuOpen;
+    bool ShowSignIn => app.AuthRequired && app.ErrorText != null;
 
     public FlyoutForm(App app)
     {
@@ -527,7 +564,8 @@ class FlyoutForm : Form
         {
             using var f = Fnt(10.5, FontStyle.Regular);
             var sz = g.MeasureString(err, f, L(300) - 2 * pad);
-            y += (int)Math.Ceiling(sz.Height) + L(12);
+            y += (int)Math.Ceiling(sz.Height) + L(ShowSignIn ? 8 : 12);
+            if (ShowSignIn) y += L(28) + L(12);               // sign-in button
         }
         y += 1 + L(12);                                       // divider
         y += L(20) + pad;                                     // footer row
@@ -545,6 +583,7 @@ class FlyoutForm : Form
         g.Clear(Theme.Bg);
         using (var border = new Pen(Theme.Border))
             g.DrawRectangle(border, 0, 0, Width - 1, Height - 1);
+        signInRect = Rectangle.Empty;
 
         int pad = L(14), y = pad, w = Width;
 
@@ -623,7 +662,17 @@ class FlyoutForm : Form
             var rect = new RectangleF(pad, y, w - 2 * pad, Height);
             var sz = g.MeasureString(err, f, w - 2 * pad);
             g.DrawString(err, f, b, rect);
-            y += (int)Math.Ceiling(sz.Height) + L(12);
+            y += (int)Math.Ceiling(sz.Height) + L(ShowSignIn ? 8 : 12);
+            if (ShowSignIn)
+            {
+                signInRect = new Rectangle(pad, y, w - 2 * pad, L(28));
+                using (var path = Win32.Rounded(signInRect, L(6)))
+                using (var bg = new SolidBrush(Theme.Accent)) g.FillPath(bg, path);
+                using (var bf = Fnt(10.5, FontStyle.Bold))
+                    Draw.Centered(g, "Sign in to Claude Code…", bf, Color.White,
+                                  signInRect.X + signInRect.Width / 2f, signInRect.Y + signInRect.Height / 2f);
+                y += L(28) + L(12);
+            }
         }
 
         // Divider
@@ -693,7 +742,8 @@ class FlyoutForm : Form
     {
         base.OnMouseMove(e);
         Cursor = refreshRect.Contains(e.Location) || gaugeRect.Contains(e.Location) ||
-                 gearRect.Contains(e.Location) ? Cursors.Hand : Cursors.Default;
+                 gearRect.Contains(e.Location) || signInRect.Contains(e.Location)
+                 ? Cursors.Hand : Cursors.Default;
     }
 
     protected override void OnMouseUp(MouseEventArgs e)
@@ -701,6 +751,7 @@ class FlyoutForm : Form
         base.OnMouseUp(e);
         if (e.Button != MouseButtons.Left) return;
         if (refreshRect.Contains(e.Location)) app.RefreshNow();
+        else if (signInRect.Contains(e.Location)) BeginInvoke(app.SignIn);
         else if (gaugeRect.Contains(e.Location)) app.ToggleFloating();
         else if (gearRect.Contains(e.Location))
         {
@@ -918,13 +969,193 @@ static class LoginItem
     }
 }
 
+// ───────────────────────────── Claude Code sign-in ─────────────────────────────
+// Recovery from a revoked refresh token: launch Claude Code's own
+// `claude auth login` in a visible console and refresh once it writes new
+// credentials. The meter never implements OAuth itself.
+
+static class ClaudeCli
+{
+    public const string InstallCommand = "winget install Anthropic.ClaudeCode";
+    const string InstallPage = "https://code.claude.com/docs/en/setup";
+
+    static bool busy;   // a sign-in watch or the not-found dialog is active
+
+    public static string? FindClaude()
+    {
+        var over = Environment.GetEnvironmentVariable("CLAUDE_METER_CLAUDE_EXE");
+        if (!string.IsNullOrEmpty(over)) return File.Exists(over) ? over : null;
+
+        try
+        {
+            var psi = new ProcessStartInfo("where.exe", "claude")
+            {
+                UseShellExecute = false, RedirectStandardOutput = true,
+                RedirectStandardError = true, CreateNoWindow = true,
+            };
+            using var p = Process.Start(psi);
+            if (p != null)
+            {
+                var outTask = p.StandardOutput.ReadToEndAsync();
+                if (p.WaitForExit(5000) && outTask.Wait(2000))
+                {
+                    foreach (var raw in outTask.Result.Split('\n'))
+                    {
+                        var line = raw.Trim();
+                        if ((line.EndsWith(".exe", StringComparison.OrdinalIgnoreCase) ||
+                             line.EndsWith(".cmd", StringComparison.OrdinalIgnoreCase)) &&
+                            File.Exists(line)) return line;
+                    }
+                }
+                else { try { p.Kill(); } catch { } }
+            }
+        }
+        catch { }
+
+        string Env(Environment.SpecialFolder f) => Environment.GetFolderPath(f);
+        var candidates = new[]
+        {
+            Path.Combine(Env(Environment.SpecialFolder.LocalApplicationData), "Microsoft", "WinGet", "Links", "claude.exe"),
+            Path.Combine(Env(Environment.SpecialFolder.UserProfile), ".local", "bin", "claude.exe"),
+            Path.Combine(Env(Environment.SpecialFolder.ApplicationData), "npm", "claude.cmd"),
+        };
+        return candidates.FirstOrDefault(File.Exists);
+    }
+
+    public static void SignIn(Action refresh)
+    {
+        if (busy) return;
+        var exe = FindClaude();
+        if (exe == null)
+        {
+            busy = true;
+            try { using var d = new NotFoundDialog(InstallCommand, InstallPage); d.ShowDialog(); }
+            finally { busy = false; }
+            return;
+        }
+
+        Process? proc;
+        try
+        {
+            proc = Process.Start(new ProcessStartInfo
+            {
+                UseShellExecute = true, FileName = exe, Arguments = "auth login",
+            });
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show(ex.Message, "Claude Meter");
+            return;
+        }
+
+        busy = true;
+        var started = DateTime.UtcNow;
+        var lastWrite = File.GetLastWriteTimeUtc(Creds.CredsPath);
+        var timer = new System.Windows.Forms.Timer { Interval = 2000 };
+        void Finish()
+        {
+            timer.Stop();
+            timer.Dispose();
+            proc?.Dispose();
+            busy = false;
+        }
+        timer.Tick += (_, _) =>
+        {
+            var now = File.GetLastWriteTimeUtc(Creds.CredsPath);
+            if (now != lastWrite) { lastWrite = now; refresh(); }
+
+            bool exited = false;
+            try { exited = proc == null || proc.HasExited; } catch { exited = true; }
+            if (exited)
+            {
+                int code = -1;
+                try { code = proc?.ExitCode ?? -1; } catch { }
+                Finish();
+                if (code == 0) refresh();
+            }
+            else if (DateTime.UtcNow - started > TimeSpan.FromMinutes(10)) Finish();
+        };
+        timer.Start();
+    }
+}
+
+class NotFoundDialog : Form
+{
+    public NotFoundDialog(string installCommand, string installPage)
+    {
+        Text = "Claude Code not found";
+        FormBorderStyle = FormBorderStyle.FixedDialog;
+        MaximizeBox = false; MinimizeBox = false;
+        StartPosition = FormStartPosition.CenterScreen;
+        TopMost = true;
+        BackColor = Theme.Bg; ForeColor = Theme.Fg;
+        Font = new Font("Segoe UI", 9.5f);
+        // Size from content, not fixed pixels, so it is right at any DPI.
+        AutoSize = true;
+        AutoSizeMode = AutoSizeMode.GrowAndShrink;
+        int px(int logical) => (int)Math.Round(logical * DeviceDpi / 96f);
+        Padding = new Padding(px(16));
+
+        var body = new Label
+        {
+            Text = "Claude Meter reads Claude Code's sign-in, but the claude command isn't installed on this PC.\n\n" +
+                   "Install it from PowerShell:\n" + installCommand + "\n\n" +
+                   "Then click \"Sign in to Claude Code…\" again.",
+            AutoSize = true, MaximumSize = new Size(px(420), 0),
+            Margin = new Padding(0, 0, 0, px(14)),
+        };
+        Button Btn(string text, EventHandler click)
+        {
+            var b = new Button
+            {
+                Text = text, AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink,
+                Padding = new Padding(px(6), px(2), px(6), px(2)),
+                Margin = new Padding(0, 0, px(10), 0),
+                FlatStyle = FlatStyle.Flat, BackColor = Theme.Track, ForeColor = Theme.Fg,
+            };
+            b.FlatAppearance.BorderColor = Theme.Border;
+            b.Click += click;
+            return b;
+        }
+        var copy = Btn("Copy command", (_, _) =>
+        {
+            try { Clipboard.SetText(installCommand); } catch { }
+        });
+        var open = Btn("Open install page", (_, _) =>
+        {
+            try { Process.Start(new ProcessStartInfo(installPage) { UseShellExecute = true }); } catch { }
+        });
+        var close = Btn("Close", (_, _) => Close());
+        var buttons = new FlowLayoutPanel
+        {
+            AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink,
+            FlowDirection = FlowDirection.LeftToRight, WrapContents = false,
+            Margin = Padding.Empty,
+        };
+        buttons.Controls.AddRange(new Control[] { copy, open, close });
+        var layout = new FlowLayoutPanel
+        {
+            AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink,
+            FlowDirection = FlowDirection.TopDown, WrapContents = false,
+            Dock = DockStyle.Fill,
+        };
+        layout.Controls.Add(body);
+        layout.Controls.Add(buttons);
+        Controls.Add(layout);
+        CancelButton = close;
+    }
+}
+
 // ───────────────────────────── App controller ─────────────────────────────
 
 class App : ApplicationContext
 {
+    public const string AuthRequiredText = "Claude Code sign-in has expired or been revoked.";
+
     public UsageSnapshot? Snap;
     public string? Plan;
     public string? ErrorText;
+    public bool AuthRequired { get; private set; }
     public bool Refreshing;
     public readonly HistoryStore History = new();
 
@@ -939,6 +1170,9 @@ class App : ApplicationContext
         Theme.Refresh();
         tray = new NotifyIcon { Visible = true, Text = "Claude Meter" };
         tray.MouseUp += (_, e) => { if (e.Button == MouseButtons.Left) ToggleFlyout(); };
+        // Only the auth balloon should launch sign-in; usage-warning balloons
+        // are only shown while AuthRequired is false.
+        tray.BalloonTipClicked += (_, _) => { if (AuthRequired) SignIn(); };
         tray.ContextMenuStrip = BuildMenu(includeRefresh: true);
 
         flyout = new FlyoutForm(this);
@@ -990,10 +1224,18 @@ class App : ApplicationContext
         try
         {
             var (snap, plan) = await UsageAPI.FetchUsage();
-            Snap = snap; Plan = plan; ErrorText = null;
+            Snap = snap; Plan = plan; ErrorText = null; AuthRequired = false;
             if (snap.Session is LimitEntry s && snap.WeeklyAll is LimitEntry w)
                 History.Record(s.Percent, w.Percent);
             Notifier.Check(snap, tray);
+        }
+        catch (AuthRequiredException)
+        {
+            ErrorText = AuthRequiredText;
+            if (!AuthRequired)
+                tray.ShowBalloonTip(10000, "Claude Meter can't sign in",
+                                    "Click to sign in to Claude Code.", ToolTipIcon.Warning);
+            AuthRequired = true;
         }
         catch (ApiException ex) { ErrorText = ex.Message; }
         catch (Exception ex) { ErrorText = "Usage request failed: " + ex.Message; }
@@ -1028,6 +1270,8 @@ class App : ApplicationContext
         flyout.ShowNearTray();
     }
 
+    public void SignIn() => ClaudeCli.SignIn(RefreshNow);
+
     public void ToggleFloating()
     {
         if (floatForm.Visible) { floatForm.Hide(); S.ShowFloating = false; }
@@ -1038,7 +1282,11 @@ class App : ApplicationContext
     public ContextMenuStrip BuildMenu(bool includeRefresh)
     {
         var menu = new ContextMenuStrip();
-        if (includeRefresh) menu.Items.Add("Refresh now", null, (_, _) => RefreshNow());
+        if (includeRefresh)
+        {
+            menu.Items.Add("Refresh now", null, (_, _) => RefreshNow());
+            menu.Items.Add("Sign in to Claude Code…", null, (_, _) => SignIn());
+        }
 
         var floatItem = new ToolStripMenuItem("Desktop gauge") { CheckOnClick = false };
         floatItem.Click += (_, _) => ToggleFloating();
@@ -1124,6 +1372,15 @@ static class Program
                 }
             }
             catch (Exception ex) { Console.WriteLine("ERROR: " + ex.Message); }
+            Win32.FreeConsole();
+            return;
+        }
+
+        // `--find-claude`: print the resolved claude path (or "not found"), no UI, no mutex.
+        if (args.Contains("--find-claude"))
+        {
+            Win32.AttachConsole(-1);
+            Console.WriteLine(ClaudeCli.FindClaude() ?? "not found");
             Win32.FreeConsole();
             return;
         }
