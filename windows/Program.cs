@@ -624,6 +624,127 @@ static class Draw
         g.FillPath(brush, path);
         g.DrawPath(pen, path);
     }
+
+    // Rings centre numbers: the stack (outer to inner = top to bottom) is laid out by ink bounds and
+    // scaled so every line's ink box (plus the outline) stays inside a circle of radius fitR about (cx, cy).
+    // rel = relative em size of each line (keeps the 19 : 15 : 12 proportions).
+    public static void FitStack(Graphics g, IList<(string Text, Color Color, double Rel)> lines,
+                                float cx, float cy, float fitR, float stroke, float maxEm)
+    {
+        const float BaseEm = 100f;
+        using var fam = new FontFamily("Segoe UI");
+        using var sf = (StringFormat)StringFormat.GenericTypographic.Clone();
+        var paths = new List<GraphicsPath>();
+        var bounds = new List<RectangleF>();
+        foreach (var l in lines)
+        {
+            var p = new GraphicsPath();
+            p.AddString(l.Text, fam, (int)FontStyle.Bold, (float)(BaseEm * l.Rel), PointF.Empty, sf);
+            paths.Add(p);
+            bounds.Add(p.GetBounds());
+        }
+        double relMax = lines.Max(l => l.Rel);
+
+        // Ink rectangles (relative to the stack centre) at scale k.
+        (float x, float y, float w, float h)[] Layout(float k)
+        {
+            var r = new (float x, float y, float w, float h)[lines.Count];
+            float gap = 0.2f * k * bounds.Max(b => b.Height);
+            float total = -gap;
+            for (int i = 0; i < r.Length; i++) total += bounds[i].Height * k + stroke + gap;
+            float y = -total / 2f;
+            for (int i = 0; i < r.Length; i++)
+            {
+                float w = bounds[i].Width * k + stroke, h = bounds[i].Height * k + stroke;
+                r[i] = (-w / 2f, y, w, h);
+                y += h + gap;
+            }
+            return r;
+        }
+        bool Fits(float k)
+        {
+            foreach (var r in Layout(k))
+            {
+                float dx = r.w / 2f, dy = Math.Max(Math.Abs(r.y), Math.Abs(r.y + r.h));
+                if (dx * dx + dy * dy > fitR * fitR) return false;
+            }
+            return true;
+        }
+        float lo = 0f, hi = (float)(maxEm / (BaseEm * relMax));
+        if (Fits(hi)) lo = hi;
+        else for (int it = 0; it < 28; it++) { float mid = (lo + hi) / 2f; if (Fits(mid)) lo = mid; else hi = mid; }
+        float scale = lo;
+
+        var rects = Layout(scale);
+        for (int i = 0; i < paths.Count; i++)
+        {
+            var b = bounds[i];
+            using var m = new Matrix();
+            m.Translate(cx, cy + rects[i].y + rects[i].h / 2f);
+            m.Scale(scale, scale);
+            m.Translate(-(b.X + b.Width / 2f), -(b.Y + b.Height / 2f));
+            paths[i].Transform(m);
+            using var brush = new SolidBrush(lines[i].Color);
+            using var pen = new Pen(Color.Black, stroke) { LineJoin = LineJoin.Round };
+            g.FillPath(brush, paths[i]);
+            g.DrawPath(pen, paths[i]);
+            paths[i].Dispose();
+        }
+    }
+
+    // Thin text along the centreline (radius rMid) of a ring band of width `band`: starts at 12 o'clock
+    // and runs clockwise, glyph by glyph rotated to the tangent, upright on the outside of the circle.
+    // Cap height = 60 % of the band; shrunk if the text would not fit in a quarter turn.
+    public static void RingLabel(Graphics g, string text, float cx, float cy, float rMid, float band, Color color)
+    {
+        if (string.IsNullOrEmpty(text)) return;
+        FontFamily fam;
+        fam = new FontFamily("Segoe UI");
+        using (fam)
+        {
+            const FontStyle style = FontStyle.Regular;
+            float design = fam.GetEmHeight(style);
+            float capRatio = 0.70f;   // Segoe UI cap height / em
+            float em = 0.60f * band / capRatio;
+            using var sf = (StringFormat)StringFormat.GenericTypographic.Clone();
+            sf.FormatFlags |= StringFormatFlags.MeasureTrailingSpaces;
+
+            float[] Advances(float e)
+            {
+                using var f = new Font(fam, e, style, GraphicsUnit.Pixel);
+                var a = new float[text.Length + 1];
+                for (int i = 1; i <= text.Length; i++)
+                    a[i] = g.MeasureString(text.Substring(0, i), f, PointF.Empty, sf).Width;
+                return a;
+            }
+            var adv = Advances(em);
+            float cap = em * capRatio;
+            float rBase = rMid - cap / 2f;
+            float quarter = (float)(Math.PI / 2 * rBase) - em * 0.1f;
+            if (adv[text.Length] > quarter)
+            {
+                float k = quarter / adv[text.Length];
+                em *= k; cap = em * capRatio; rBase = rMid - cap / 2f;
+                adv = Advances(em);
+            }
+            float baseline = em * fam.GetCellAscent(style) / design;
+            using var brush = new SolidBrush(color);
+            for (int i = 0; i < text.Length; i++)
+            {
+                if (char.IsWhiteSpace(text[i])) continue;
+                float w = adv[i + 1] - adv[i];
+                float theta = (adv[i] + w / 2f) / rBase;           // radians clockwise from 12 o'clock
+                using var path = new GraphicsPath();
+                path.AddString(text[i].ToString(), fam, (int)style, em, PointF.Empty, sf);
+                using var m = new Matrix();
+                m.Translate(cx + rBase * (float)Math.Sin(theta), cy - rBase * (float)Math.Cos(theta));
+                m.Rotate(theta * 180f / (float)Math.PI);
+                m.Translate(-w / 2f, -baseline);
+                path.Transform(m);
+                g.FillPath(brush, path);
+            }
+        }
+    }
 }
 
 // ───────────────────────────── Tray icon rendering ─────────────────────────────
@@ -1026,7 +1147,7 @@ class FloatForm : Form
         StartPosition = FormStartPosition.Manual;
         TopMost = true;
         DoubleBuffered = true;
-        Opacity = 0.94;
+        // Opacity 0.94 is applied in ApplyLayering (the Rings disc is a per-pixel-alpha layered window).
         // Dragging starts from OnMouseDown (WM_NCLBUTTONDOWN) so the client area
         // stays HTCLIENT and the tooltip sees mouse moves; no caption means a
         // double-click can't maximize, but keep these off anyway.
@@ -1048,6 +1169,84 @@ class FloatForm : Form
             var p = base.CreateParams;
             p.ExStyle |= Win32.WS_EX_TOOLWINDOW | Win32.WS_EX_NOACTIVATE;
             return p;
+        }
+    }
+
+    // Layering: 1 = Rings disc (UpdateLayeredWindow, per-pixel alpha), 2 = other styles (whole-window alpha 0.94).
+    // The layered bit is cleared and set again on every switch, so UpdateLayeredWindow stays legal after
+    // SetLayeredWindowAttributes and vice versa.
+    int layerMode;
+    bool ringsMode;
+    const byte WindowAlpha = 240;   // 0.94
+
+    protected override void OnHandleCreated(EventArgs e)
+    {
+        layerMode = 0;
+        base.OnHandleCreated(e);
+    }
+
+    protected override void OnVisibleChanged(EventArgs e)
+    {
+        base.OnVisibleChanged(e);
+        if (Visible) Redraw();
+    }
+
+    void ApplyLayering(bool rings)
+    {
+        int want = rings ? 1 : 2;
+        ringsMode = rings;
+        if (!IsHandleCreated || layerMode == want) return;
+        int ex = Win32.GetWindowLong(Handle, Win32.GWL_EXSTYLE);
+        Win32.SetWindowLong(Handle, Win32.GWL_EXSTYLE, ex & ~Win32.WS_EX_LAYERED);
+        Win32.SetWindowLong(Handle, Win32.GWL_EXSTYLE, ex | Win32.WS_EX_LAYERED);
+        if (!rings) Win32.SetLayeredWindowAttributes(Handle, 0, WindowAlpha, Win32.LWA_ALPHA);
+        Win32.DwmFrame(this, rings);
+        layerMode = want;
+    }
+
+    // Repaint whatever the current style needs.
+    public void Redraw()
+    {
+        if (ringsMode) PushLayered();
+        else Invalidate();
+    }
+
+    // Render the Rings disc into a 32-bpp premultiplied-ARGB DIB and hand it to the window manager.
+    void PushLayered()
+    {
+        if (!IsHandleCreated || layerMode != 1 || Width <= 0 || Height <= 0) return;
+        int w = Width, h = Height;
+        var bi = new Win32.BITMAPINFOHEADER
+        {
+            biSize = Marshal.SizeOf<Win32.BITMAPINFOHEADER>(), biWidth = w, biHeight = -h,
+            biPlanes = 1, biBitCount = 32, biCompression = 0,
+        };
+        IntPtr screenDc = Win32.GetDC(IntPtr.Zero);
+        IntPtr memDc = Win32.CreateCompatibleDC(screenDc);
+        IntPtr hbm = Win32.CreateDIBSection(memDc, ref bi, 0, out IntPtr bits, IntPtr.Zero, 0);
+        IntPtr old = Win32.SelectObject(memDc, hbm);
+        try
+        {
+            using (var bmp = new Bitmap(w, h, w * 4, System.Drawing.Imaging.PixelFormat.Format32bppPArgb, bits))
+            using (var g = Graphics.FromImage(bmp))
+            {
+                g.Clear(Color.Transparent);
+                DrawRings(g);
+                g.Flush();
+            }
+            var size = new Win32.SIZE { cx = w, cy = h };
+            var src = new Win32.POINT();
+            var blend = new Win32.BLENDFUNCTION
+            { BlendOp = 0 /* AC_SRC_OVER */, SourceConstantAlpha = WindowAlpha, AlphaFormat = 1 /* AC_SRC_ALPHA */ };
+            Win32.UpdateLayeredWindow(Handle, screenDc, IntPtr.Zero, ref size, memDc, ref src, 0, ref blend,
+                                      Win32.ULW_ALPHA);
+        }
+        finally
+        {
+            Win32.SelectObject(memDc, old);
+            Win32.DeleteObject(hbm);
+            Win32.DeleteDC(memDc);
+            Win32.ReleaseDC(IntPtr.Zero, screenDc);
         }
     }
 
@@ -1089,32 +1288,19 @@ class FloatForm : Form
         var reset = Fmt.ResetText(app.Snap?.Session?.ResetsAt);
         int rings = app.Snap is UsageSnapshot rs ? Gauges.Canonical(rs).Count : 2;
         var style = S.FloatStyle;
+        ApplyLayering(style == "rings");
         if (style == "rings")
         {
-            Win32.DiscFrame(this, true);
             Size = new Size(L(128), L(128));
-            using var disc = new GraphicsPath();
-            disc.AddEllipse(0, 0, Width, Height);
-            var old = Region;
-            Region = new Region(disc);
-            old?.Dispose();
         }
         else if (style == "square")
         {
-            Win32.DiscFrame(this, false);
-            var old = Region;
-            Region = null;
-            old?.Dispose();
             var textW = (int)Math.Ceiling(TextW(g, reset, f9));
             int w = Math.Max(L(34 * rings + 16 * (rings - 1)), textW) + L(28);
             Size = new Size(w, L(10 + 34 + 12 + 7 + 12 + 10));
         }
         else
         {
-            Win32.DiscFrame(this, false);
-            var old = Region;
-            Region = null;
-            old?.Dispose();
             // left pad + rings block + gap + widest text line + right pad (= left pad)
             var lines = OneLineText();
             using var f10 = Fnt(10, FontStyle.Bold);
@@ -1130,7 +1316,7 @@ class FloatForm : Form
         }
         KeepOnScreen();
         tip.SetToolTip(this, TooltipText());
-        Invalidate();
+        Redraw();
     }
 
     // Tight text width (no GDI+ side bearings), so left and right padding are exact.
@@ -1175,18 +1361,17 @@ class FloatForm : Form
         return string.Join("\n", lines);
     }
 
+    // Rings disc: drawn by DrawRings into the layered bitmap (PushLayered), never through WM_PAINT.
     protected override void OnPaint(PaintEventArgs e)
     {
+        if (ringsMode) return;
         var g = e.Graphics;
         g.SmoothingMode = SmoothingMode.AntiAlias;
         g.TextRenderingHint = TextRenderingHint.ClearTypeGridFit;
         g.Clear(Theme.Bg);
         var style = S.FloatStyle;
         using (var border = new Pen(Theme.Border))
-        {
-            if (style == "rings") g.DrawEllipse(border, 0.5f, 0.5f, Width - 1f, Height - 1f);
-            else g.DrawRectangle(border, 0, 0, Width - 1, Height - 1);
-        }
+            g.DrawRectangle(border, 0, 0, Width - 1, Height - 1);
 
         var snap = app.Snap;
         if (snap == null)
@@ -1197,33 +1382,7 @@ class FloatForm : Form
         }
 
         var reset = Fmt.ResetText(snap.Session?.ResetsAt);
-        if (style == "rings")
-        {
-            float cx = Width / 2f, cy = Height / 2f;
-            float pen = L(9);
-            void R(double dia, double pct)
-            {
-                float d = L(dia);
-                Draw.Ring(g, new RectangleF(cx - d / 2f, cy - d / 2f, d, d), pen, pct, 1.6f * F);
-            }
-            // Visible gauges outside in (week, model, session); diameters 108 / 84 / 60 by position.
-            var order = Gauges.Canonical(snap);
-            double Pct(Gauge k) => Gauges.Entry(snap, k)?.Percent ?? 0;
-            double[] dias = { 108, 84, 60 };
-            for (int i = 0; i < order.Count; i++) R(dias[i], Pct(order[i]));
-            // Numbers top to bottom: outer to inner by default, reversed when ringsCentre = "session".
-            var numbers = new List<Gauge>(order);
-            if (S.RingsCentre == "session") numbers.Reverse();
-            double[] sizes = numbers.Count switch { 3 => new[] { 19.0, 15, 12 }, 2 => new[] { 19.0, 13 }, _ => new[] { 22.0 } };
-            double[] offs = numbers.Count switch { 3 => new[] { -14.0, 1, 14 }, 2 => new[] { -7.0, 8 }, _ => new[] { 0.0 } };
-            for (int i = 0; i < numbers.Count; i++)
-            {
-                double v = Pct(numbers[i]);
-                using var fi = Fnt(sizes[i], FontStyle.Bold);
-                Draw.CenteredOutlined(g, Math.Round(v).ToString(), fi, Sev.Of(v), L(1), cx, cy + L(offs[i]));
-            }
-        }
-        else if (style == "square")
+        if (style == "square")
         {
             var vis = Gauges.Display(snap);
             for (int i = 0; i < vis.Count; i++)
@@ -1237,22 +1396,76 @@ class FloatForm : Form
             for (int i = 0; i < vis.Count; i++)
                 MiniRing(g, vis[i], snap, L(14 + (34 + 14) * i + 17), L(10));
             float tx = L(14 + (34 + 14) * vis.Count);
-            // Text lines stacked and vertically centred in the panel.
+            // Text lines stacked, vertically centred in the panel, each centred within the column
+            // (column = widest line, left edge at tx).
             var lines = OneLineText();
             var fonts = lines.Select((_, i) => i == 0 ? Fnt(10, FontStyle.Bold) : Fnt(9)).ToArray();
             float blockH = fonts.Sum(f => f.GetHeight(g));
             float ty = (Height - blockH) / 2f;
+            float[] lw = lines.Select((s, i) => TextW(g, s, fonts[i])).ToArray();
+            float colW = lw.Max();
             using var tb = new SolidBrush(Theme.Fg2);
             using var tsf = (StringFormat)StringFormat.GenericTypographic.Clone();
             for (int i = 0; i < lines.Length; i++)
             {
-                g.DrawString(lines[i], fonts[i], tb, tx, ty, tsf);
+                g.DrawString(lines[i], fonts[i], tb, tx + (colW - lw[i]) / 2f, ty, tsf);
                 ty += fonts[i].GetHeight(g);
                 fonts[i].Dispose();
             }
         }
     }
 
+    // The Rings disc on a transparent surface: antialiased disc, rings, band labels, centre numbers.
+    void DrawRings(Graphics g)
+    {
+        g.SmoothingMode = SmoothingMode.AntiAlias;
+        g.TextRenderingHint = TextRenderingHint.AntiAlias;
+        using (var bg = new SolidBrush(Theme.Bg))
+            g.FillEllipse(bg, 0.5f, 0.5f, Width - 1f, Height - 1f);
+        using (var border = new Pen(Theme.Border))
+            g.DrawEllipse(border, 0.5f, 0.5f, Width - 1f, Height - 1f);
+
+        var snap = app.Snap;
+        if (snap == null)
+        {
+            using var f = Fnt(10);
+            Draw.Centered(g, app.ErrorText ?? "Claude Meter…", f, Theme.Fg2, Width / 2f, Height / 2f);
+            return;
+        }
+
+        float cx = Width / 2f, cy = Height / 2f;
+        float pen = L(9);
+        // Visible gauges outside in (week, model, session); diameters 108 / 84 / 60 by position.
+        var order = Gauges.Canonical(snap);
+        double Pct(Gauge k) => Gauges.Entry(snap, k)?.Percent ?? 0;
+        double[] dias = { 108, 84, 60 };
+        for (int i = 0; i < order.Count; i++)
+        {
+            float d = L(dias[i]);
+            Draw.Ring(g, new RectangleF(cx - d / 2f, cy - d / 2f, d, d), pen, Pct(order[i]), 1.6f * F);
+        }
+        // Band labels along each band centreline: total / model name / session.
+        for (int i = 0; i < order.Count; i++)
+        {
+            float d = L(dias[i]);
+            string label = order[i] switch
+            {
+                Gauge.Week => "total",
+                Gauge.Session => "session",
+                _ => snap.PrimaryModel is LimitEntry m && UsageSnapshot.ModelName(m).Trim().Length > 0
+                         ? UsageSnapshot.ModelName(m).Trim().ToLowerInvariant() : "model",
+            };
+            Draw.RingLabel(g, label, cx, cy, d / 2f - pen / 2f, pen, Color.Black);
+        }
+        // Numbers top to bottom: outer to inner by default, reversed when ringsCentre = "session".
+        // Sized to fit the innermost ring's hole with a margin of 1/10 of the hole diameter on every side.
+        var numbers = new List<Gauge>(order);
+        if (S.RingsCentre == "session") numbers.Reverse();
+        double[] rel = numbers.Count switch { 3 => new[] { 19.0, 15, 12 }, 2 => new[] { 19.0, 13 }, _ => new[] { 22.0 } };
+        var lines = numbers.Select((k, i) => (Math.Round(Pct(k)).ToString(), Sev.Of(Pct(k)), rel[i])).ToList();
+        float hole = L(dias[order.Count - 1]) - 2 * pen - 2 * 0.8f * F;
+        Draw.FitStack(g, lines, cx, cy, 0.4f * hole, L(1), L(46));
+    }
     void MiniRing(Graphics g, Gauge kind, UsageSnapshot snap, float cx, int top)
     {
         var entry = Gauges.Entry(snap, kind);
@@ -1301,20 +1514,53 @@ static class Win32
         catch { }
     }
 
-    // Rings float is a disc (window Region): switch off the Win11 rounded-corner frame and
-    // DWM border, which otherwise draw a rounded rectangle around the disc. Other styles keep both.
-    public static void DiscFrame(Form f, bool disc)
+    // DWM still frames a layered window's rectangle (rounded border + shadow) around the disc.
+    // off = true: no non-client rendering (frame, shadow), square corners, no border colour.
+    public static void DwmFrame(Form f, bool off)
     {
         try
         {
-            int pref = disc ? 1 /* DWMWCP_DONOTROUND */ : 2 /* DWMWCP_ROUND */;
+            int policy = off ? 1 /* DWMNCRP_DISABLED */ : 0 /* DWMNCRP_USEWINDOWSTYLE */;
+            DwmSetWindowAttribute(f.Handle, 2 /* DWMWA_NCRENDERING_POLICY */, ref policy, sizeof(int));
+            int pref = off ? 1 /* DWMWCP_DONOTROUND */ : 2 /* DWMWCP_ROUND */;
             DwmSetWindowAttribute(f.Handle, 33 /* DWMWA_WINDOW_CORNER_PREFERENCE */, ref pref, sizeof(int));
-            int border = unchecked((int)(disc ? 0xFFFFFFFE /* DWMWA_COLOR_NONE */ : 0xFFFFFFFF /* DWMWA_COLOR_DEFAULT */));
+            int border = unchecked((int)(off ? 0xFFFFFFFE /* DWMWA_COLOR_NONE */ : 0xFFFFFFFF /* DWMWA_COLOR_DEFAULT */));
             DwmSetWindowAttribute(f.Handle, 34 /* DWMWA_BORDER_COLOR */, ref border, sizeof(int));
         }
         catch { }
     }
 
+    // Layered window (Rings disc): per-pixel-alpha bitmap via UpdateLayeredWindow.
+    public const int GWL_EXSTYLE = -20;
+    public const int WS_EX_LAYERED = 0x80000;
+    public const uint LWA_ALPHA = 2;
+    public const uint ULW_ALPHA = 2;
+    [StructLayout(LayoutKind.Sequential)] public struct POINT { public int x, y; }
+    [StructLayout(LayoutKind.Sequential)] public struct SIZE { public int cx, cy; }
+    [StructLayout(LayoutKind.Sequential)]
+    public struct BLENDFUNCTION { public byte BlendOp, BlendFlags, SourceConstantAlpha, AlphaFormat; }
+    [StructLayout(LayoutKind.Sequential)]
+    public struct BITMAPINFOHEADER
+    {
+        public int biSize, biWidth, biHeight;
+        public short biPlanes, biBitCount;
+        public int biCompression, biSizeImage, biXPelsPerMeter, biYPelsPerMeter, biClrUsed, biClrImportant;
+    }
+    [DllImport("user32.dll")] public static extern int GetWindowLong(IntPtr hWnd, int index);
+    [DllImport("user32.dll")] public static extern int SetWindowLong(IntPtr hWnd, int index, int value);
+    [DllImport("user32.dll")] public static extern bool SetLayeredWindowAttributes(IntPtr hWnd, uint key, byte alpha, uint flags);
+    [DllImport("user32.dll")]
+    public static extern bool UpdateLayeredWindow(IntPtr hWnd, IntPtr hdcDst, IntPtr pptDst, ref SIZE size,
+        IntPtr hdcSrc, ref POINT pptSrc, uint crKey, ref BLENDFUNCTION blend, uint flags);
+    [DllImport("user32.dll")] public static extern IntPtr GetDC(IntPtr hWnd);
+    [DllImport("user32.dll")] public static extern int ReleaseDC(IntPtr hWnd, IntPtr hdc);
+    [DllImport("gdi32.dll")] public static extern IntPtr CreateCompatibleDC(IntPtr hdc);
+    [DllImport("gdi32.dll")] public static extern bool DeleteDC(IntPtr hdc);
+    [DllImport("gdi32.dll")] public static extern IntPtr SelectObject(IntPtr hdc, IntPtr obj);
+    [DllImport("gdi32.dll")] public static extern bool DeleteObject(IntPtr obj);
+    [DllImport("gdi32.dll")]
+    public static extern IntPtr CreateDIBSection(IntPtr hdc, ref BITMAPINFOHEADER bmi, uint usage,
+        out IntPtr bits, IntPtr section, uint offset);
     public static GraphicsPath Rounded(RectangleF r, float radius)
     {
         var p = new GraphicsPath();
@@ -1643,7 +1889,7 @@ class App : ApplicationContext
             Theme.Refresh();
             UpdateTray();
             flyout.Invalidate();
-            floatForm.Invalidate();
+            floatForm.Redraw();
         };
 
         UpdateTray();
@@ -1671,7 +1917,7 @@ class App : ApplicationContext
             lastStyle = S.FloatStyle;
             if (floatForm.Visible) floatForm.Relayout();
         }
-        else if (floatForm.Visible) floatForm.Invalidate();   // e.g. rings-centre change
+        else if (floatForm.Visible) floatForm.Redraw();   // e.g. rings-centre change
     }
 
     public async void RefreshNow()
@@ -1791,10 +2037,12 @@ class App : ApplicationContext
     {
         var menu = new ContextMenuStrip();
         CheckMarginRenderer.Apply(menu);
+        ToolStripMenuItem? signInItem = null;
         if (includeRefresh)
         {
             menu.Items.Add("Refresh now", null, (_, _) => RefreshNow());
-            menu.Items.Add("Sign in to Claude Code…", null, (_, _) => SignIn());
+            signInItem = new ToolStripMenuItem("Sign in to Claude Code…", null, (_, _) => SignIn()) { Visible = false };
+            menu.Items.Add(signInItem);
         }
 
         var floatItem = new ToolStripMenuItem("Desktop gauge") { CheckOnClick = false };
@@ -1870,6 +2118,7 @@ class App : ApplicationContext
         menu.Opening += (_, _) =>
         {
             floatItem.Checked = floatForm.Visible;
+            if (signInItem != null) signInItem.Visible = AuthRequired;   // only when sign-in is needed
             foreach (var (item, k) in new[] { (gSession, Gauge.Session), (gWeek, Gauge.Week), (gModel, Gauge.Model) })
             {
                 item.Checked = Gauges.IsOn(k);
