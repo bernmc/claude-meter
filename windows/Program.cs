@@ -48,6 +48,51 @@ static class Sev
     };
 }
 
+// ───────────────────────────── Gauge selection ─────────────────────────────
+// Which of the three limits are drawn as gauges. Menu-bar/tray metric, tooltip,
+// scoped bars and the sparkline do not use this.
+
+enum Gauge { Session, Week, Model }
+
+static class Gauges
+{
+    public static bool IsOn(Gauge k) => k switch
+    {
+        Gauge.Session => S.ShowSession,
+        Gauge.Week => S.ShowWeek,
+        _ => S.ShowModel,
+    };
+
+    public static int OnCount =>
+        (S.ShowSession ? 1 : 0) + (S.ShowWeek ? 1 : 0) + (S.ShowModel ? 1 : 0);
+
+    // Canonical order (Rings, outside in): week, model, session. Model needs a
+    // primary model; nothing left -> session.
+    public static List<Gauge> Canonical(UsageSnapshot snap)
+    {
+        var list = new List<Gauge>();
+        if (S.ShowWeek) list.Add(Gauge.Week);
+        if (S.ShowModel && snap.PrimaryModel != null) list.Add(Gauge.Model);
+        if (S.ShowSession) list.Add(Gauge.Session);
+        if (list.Count == 0) list.Add(Gauge.Session);
+        return list;
+    }
+
+    // Display order (popover, one line, square; left to right): session, week, model.
+    public static List<Gauge> Display(UsageSnapshot snap) =>
+        Canonical(snap).OrderBy(k => (int)k).ToList();
+
+    public static LimitEntry? Entry(UsageSnapshot snap, Gauge k) => k switch
+    {
+        Gauge.Session => snap.Session,
+        Gauge.Week => snap.WeeklyAll,
+        _ => snap.PrimaryModel,
+    };
+
+    // Popover ring diameter (logical px) by number of visible gauges.
+    public static int PopoverRing(int n) => n >= 3 ? 72 : n == 2 ? 84 : 96;
+}
+
 // ───────────────────────────── Settings ─────────────────────────────
 // Windows counterpart of UserDefaults: a transparent JSON file in
 // %APPDATA%\Claude Meter\settings.json.
@@ -101,6 +146,10 @@ static class S
     public static string RingsCentre  { get => Get("ringsCentre", "week"); set => Set("ringsCentre", value); }
     public static string TrayMetric   { get => Get("trayMetric", "worst"); set => Set("trayMetric", value); }
     public static bool TrayShowPct    { get => Get("trayShowPct", true);   set => Set("trayShowPct", value); }
+    // Which limits are drawn as gauges (popover rings, all float styles). Absent = on.
+    public static bool ShowSession    { get => Get("showSession", true);   set => Set("showSession", value); }
+    public static bool ShowWeek       { get => Get("showWeek", true);      set => Set("showWeek", value); }
+    public static bool ShowModel      { get => Get("showModel", true);     set => Set("showModel", value); }
     public static double WarnThreshold{ get => Get("warnThreshold", 90.0); set => Set("warnThreshold", value); }
     public static int FloatX          { get => Get("floatX", int.MinValue);set => Set("floatX", value); }
     public static int FloatY          { get => Get("floatY", int.MinValue);set => Set("floatY", value); }
@@ -519,18 +568,29 @@ static class UpdateChecker
 
 static class Draw
 {
-    public static void Ring(Graphics g, RectangleF rect, float penW, double pct)
+    // outlineExtra > 0 (Rings float style): hard near-black outline arc, penW + outlineExtra wide,
+    // drawn under the coloured arc in place of the soft halo.
+    public static void Ring(Graphics g, RectangleF rect, float penW, double pct, float outlineExtra = 0)
     {
         using var track = new Pen(Theme.Track, penW);
         var r = rect; r.Inflate(-penW / 2, -penW / 2);
         g.DrawEllipse(track, r);
         float sweep = (float)(360 * Math.Min(pct, 100) / 100);
         if (sweep < 1.5f) sweep = 1.5f;
-        // Faint dark halo behind the colored arc so it separates from the
-        // background whatever's behind the window.
-        using (var halo = new Pen(Color.FromArgb(80, 0, 0, 0), penW + 2.5f)
-        { StartCap = LineCap.Round, EndCap = LineCap.Round })
+        if (outlineExtra > 0)
+        {
+            using var outline = new Pen(Color.FromArgb(217, 0, 0, 0), penW + outlineExtra)
+            { StartCap = LineCap.Round, EndCap = LineCap.Round };
+            g.DrawArc(outline, r, -90, sweep);
+        }
+        else
+        {
+            // Faint dark halo behind the colored arc so it separates from the
+            // background whatever's behind the window.
+            using var halo = new Pen(Color.FromArgb(80, 0, 0, 0), penW + 2.5f)
+            { StartCap = LineCap.Round, EndCap = LineCap.Round };
             g.DrawArc(halo, r, -90, sweep);
+        }
         using var pen = new Pen(Sev.Of(pct), penW)
         { StartCap = LineCap.Round, EndCap = LineCap.Round };
         g.DrawArc(pen, r, -90, sweep);
@@ -541,6 +601,22 @@ static class Draw
         using var brush = new SolidBrush(color);
         using var sf = new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center };
         g.DrawString(text, font, brush, cx, cy, sf);
+    }
+
+    // Filled text in `fill` with a black stroke of strokeW px centred on the glyph edge.
+    // `font` must be created in GraphicsUnit.Pixel (Size is then the em size in px).
+    public static void CenteredOutlined(Graphics g, string text, Font font, Color fill,
+                                        float strokeW, float cx, float cy)
+    {
+        float boxW = font.Size * text.Length * 2 + 40, boxH = font.Size * 3;
+        using var sf = new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center };
+        using var path = new GraphicsPath();
+        path.AddString(text, font.FontFamily, (int)font.Style, font.Size,
+                       new RectangleF(cx - boxW / 2, cy - boxH / 2, boxW, boxH), sf);
+        using var brush = new SolidBrush(fill);
+        using var pen = new Pen(Color.Black, strokeW) { LineJoin = LineJoin.Round };
+        g.FillPath(brush, path);
+        g.DrawPath(pen, path);
     }
 }
 
@@ -619,8 +695,8 @@ class FlyoutForm : Form
 
     float F => DeviceDpi / 96f;
     int L(double logical) => (int)Math.Round(logical * F);
-    bool ThreeRings => app.Snap?.PrimaryModel != null;
-    int FlyoutW() => L(ThreeRings ? 336 : 300);
+    int VisibleGauges => app.Snap is UsageSnapshot sn ? Gauges.Canonical(sn).Count : 0;
+    int FlyoutW() => L(VisibleGauges == 3 ? 336 : 300);
 
     protected override CreateParams CreateParams
     {
@@ -656,7 +732,7 @@ class FlyoutForm : Form
         y += L(18) + L(12);                                   // header
         if (app.Snap is UsageSnapshot snap)
         {
-            y += L((snap.PrimaryModel != null ? 72 : 84) + 6 + 15 + 3) + L(28) + L(12);   // rings + labels + 2-line sublabels
+            y += L(Gauges.PopoverRing(Gauges.Canonical(snap).Count) + 6 + 15 + 3) + L(28) + L(12);   // rings + labels + 2-line sublabels
             int extra = Math.Max(0, snap.Scoped.Count - 1);   // first scoped entry is the third ring
             if (extra > 0)
                 y += extra * L(28) + (extra - 1) * L(8) + L(12);
@@ -715,21 +791,23 @@ class FlyoutForm : Form
 
         if (app.Snap is UsageSnapshot snap)
         {
-            // Big ring gauges: Session, Week (all), and the first per-model limit
-            var pm = snap.PrimaryModel;
-            int ring = L(pm != null ? 72 : 84);
-            if (pm != null)
+            // Big ring gauges: the selected limits (Session, Week (all), first per-model limit)
+            var vis = Gauges.Display(snap);
+            int n = vis.Count;
+            int ring = L(Gauges.PopoverRing(n));
+            float pitch = L(n == 3 ? 104 : 150);
+            int textW = L(n == 3 ? 100 : 144);
+            for (int i = 0; i < n; i++)
             {
-                float cx0 = w / 2f - L(104), cx1 = w / 2f, cx2 = w / 2f + L(104);
-                if (snap.Session is LimitEntry s) RingGauge(g, s, cx0, y, ring, "Session", L(100));
-                if (snap.WeeklyAll is LimitEntry wk) RingGauge(g, wk, cx1, y, ring, "Week (all)", L(100));
-                RingGauge(g, pm, cx2, y, ring, "Week (" + UsageSnapshot.ModelName(pm) + ")", L(100));
-            }
-            else
-            {
-                float cxL = w / 2f - L(75), cxR = w / 2f + L(75);
-                if (snap.Session is LimitEntry s) RingGauge(g, s, cxL, y, ring, "Session", L(144));
-                if (snap.WeeklyAll is LimitEntry wk) RingGauge(g, wk, cxR, y, ring, "Week (all)", L(144));
+                float cxi = w / 2f + (i - (n - 1) / 2f) * pitch;
+                if (Gauges.Entry(snap, vis[i]) is not LimitEntry ent) continue;
+                var label = vis[i] switch
+                {
+                    Gauge.Session => "Session",
+                    Gauge.Week => "Week (all)",
+                    _ => "Week (" + UsageSnapshot.ModelName(ent) + ")",
+                };
+                RingGauge(g, ent, cxi, y, ring, label, textW);
             }
             y += ring + L(6 + 15 + 3 + 28) + L(12);
 
@@ -1002,7 +1080,7 @@ class FloatForm : Form
         using var g = CreateGraphics();
         using var f9 = Fnt(9);
         var reset = Fmt.ResetText(app.Snap?.Session?.ResetsAt);
-        int rings = app.Snap?.PrimaryModel != null ? 3 : 2;
+        int rings = app.Snap is UsageSnapshot rs ? Gauges.Canonical(rs).Count : 2;
         var style = S.FloatStyle;
         if (style == "rings")
         {
@@ -1070,7 +1148,6 @@ class FloatForm : Form
         }
 
         var reset = Fmt.ResetText(snap.Session?.ResetsAt);
-        var pm = snap.PrimaryModel;
         if (style == "rings")
         {
             float cx = Width / 2f, cy = Height / 2f;
@@ -1078,54 +1155,39 @@ class FloatForm : Form
             void R(double dia, double pct)
             {
                 float d = L(dia);
-                Draw.Ring(g, new RectangleF(cx - d / 2f, cy - d / 2f, d, d), pen, pct);
+                Draw.Ring(g, new RectangleF(cx - d / 2f, cy - d / 2f, d, d), pen, pct, 1.6f * F);
             }
-            double wk = snap.WeeklyAll?.Percent ?? 0, se = snap.Session?.Percent ?? 0;
-            // Top (largest) number is the week by default, the session when ringsCentre = "session".
-            bool sessionTop = S.RingsCentre == "session";
-            double top = sessionTop ? se : wk, bottom = sessionTop ? wk : se;
-            if (pm != null)
+            // Visible gauges outside in (week, model, session); diameters 108 / 84 / 60 by position.
+            var order = Gauges.Canonical(snap);
+            double Pct(Gauge k) => Gauges.Entry(snap, k)?.Percent ?? 0;
+            double[] dias = { 108, 84, 60 };
+            for (int i = 0; i < order.Count; i++) R(dias[i], Pct(order[i]));
+            // Numbers top to bottom: outer to inner by default, reversed when ringsCentre = "session".
+            var numbers = new List<Gauge>(order);
+            if (S.RingsCentre == "session") numbers.Reverse();
+            double[] sizes = numbers.Count switch { 3 => new[] { 19.0, 15, 12 }, 2 => new[] { 19.0, 13 }, _ => new[] { 22.0 } };
+            double[] offs = numbers.Count switch { 3 => new[] { -14.0, 1, 14 }, 2 => new[] { -7.0, 8 }, _ => new[] { 0.0 } };
+            for (int i = 0; i < numbers.Count; i++)
             {
-                R(108, wk); R(84, pm.Percent); R(60, se);
-                using var f19 = Fnt(19, FontStyle.Bold);
-                using var f15 = Fnt(15, FontStyle.Bold);
-                using var f12 = Fnt(12, FontStyle.Bold);
-                Draw.Centered(g, Math.Round(top).ToString(), f19, Sev.Of(top), cx, cy - L(14));
-                Draw.Centered(g, Math.Round(pm.Percent).ToString(), f15, Sev.Of(pm.Percent), cx, cy + L(1));
-                Draw.Centered(g, Math.Round(bottom).ToString(), f12, Sev.Of(bottom), cx, cy + L(14));
-            }
-            else
-            {
-                R(108, wk); R(84, se);
-                using var f19 = Fnt(19, FontStyle.Bold);
-                using var f13 = Fnt(13, FontStyle.Bold);
-                Draw.Centered(g, Math.Round(top).ToString(), f19, Sev.Of(top), cx, cy - L(7));
-                Draw.Centered(g, Math.Round(bottom).ToString(), f13, Sev.Of(bottom), cx, cy + L(8));
+                double v = Pct(numbers[i]);
+                using var fi = Fnt(sizes[i], FontStyle.Bold);
+                Draw.CenteredOutlined(g, Math.Round(v).ToString(), fi, Sev.Of(v), L(1), cx, cy + L(offs[i]));
             }
         }
         else if (style == "square")
         {
-            if (pm != null)
-            {
-                MiniRing(g, snap.Session, "5 h", Width / 2f - L(50), L(10));
-                MiniRing(g, snap.WeeklyAll, "week", Width / 2f, L(10));
-                MiniRing(g, pm, UsageSnapshot.ModelName(pm).ToLowerInvariant(), Width / 2f + L(50), L(10));
-            }
-            else
-            {
-                MiniRing(g, snap.Session, "5 h", Width / 2f - L(25), L(10));
-                MiniRing(g, snap.WeeklyAll, "week", Width / 2f + L(25), L(10));
-            }
+            var vis = Gauges.Display(snap);
+            for (int i = 0; i < vis.Count; i++)
+                MiniRing(g, vis[i], snap, Width / 2f + (i - (vis.Count - 1) / 2f) * L(50), L(10));
             using var f = Fnt(9);
             Draw.Centered(g, reset, f, Theme.Fg2, Width / 2f, Height - L(16));
         }
         else
         {
-            MiniRing(g, snap.Session, "5 h", L(14 + 17), L(10));
-            MiniRing(g, snap.WeeklyAll, "week", L(14 + 34 + 14 + 17), L(10));
-            if (pm != null)
-                MiniRing(g, pm, UsageSnapshot.ModelName(pm).ToLowerInvariant(), L(14 + 2 * (34 + 14) + 17), L(10));
-            float tx = L(14 + (34 + 14) * (pm != null ? 3 : 2));
+            var vis = Gauges.Display(snap);
+            for (int i = 0; i < vis.Count; i++)
+                MiniRing(g, vis[i], snap, L(14 + (34 + 14) * i + 17), L(10));
+            float tx = L(14 + (34 + 14) * vis.Count);
             using (var f = Fnt(10, FontStyle.Bold))
             using (var b = new SolidBrush(Theme.Fg2))
                 g.DrawString("Claude", f, b, tx, L(12));
@@ -1135,8 +1197,15 @@ class FloatForm : Form
         }
     }
 
-    void MiniRing(Graphics g, LimitEntry? entry, string tag, float cx, int top)
+    void MiniRing(Graphics g, Gauge kind, UsageSnapshot snap, float cx, int top)
     {
+        var entry = Gauges.Entry(snap, kind);
+        string tag = kind switch
+        {
+            Gauge.Session => "5 h",
+            Gauge.Week => "week",
+            _ => entry != null ? UsageSnapshot.ModelName(entry).ToLowerInvariant() : "",
+        };
         double pct = entry?.Percent ?? 0;
         int size = L(34);
         Draw.Ring(g, new RectangleF(cx - size / 2f, top, size, size), L(3.5), pct);
@@ -1513,12 +1582,21 @@ class App : ApplicationContext
     }
 
     string lastStyle = S.FloatStyle;
+    string lastSel = SelKey();
+    static string SelKey() => $"{S.ShowSession}{S.ShowWeek}{S.ShowModel}";
     void OnSettingsChanged()
     {
         if (S.AutoUpdateCheck) { if (!updateTimer.Enabled) updateTimer.Start(); }
         else { updateTimer.Stop(); updateStartTimer.Stop(); }
         UpdateTray();
-        if (S.FloatStyle != lastStyle)
+        if (SelKey() != lastSel)
+        {
+            lastSel = SelKey();
+            lastStyle = S.FloatStyle;
+            if (floatForm.Visible) floatForm.Relayout();
+            flyout.Refresh(resize: true);
+        }
+        else if (S.FloatStyle != lastStyle)
         {
             lastStyle = S.FloatStyle;
             if (floatForm.Visible) floatForm.Relayout();
@@ -1652,6 +1730,24 @@ class App : ApplicationContext
         var floatItem = new ToolStripMenuItem("Desktop gauge") { CheckOnClick = false };
         floatItem.Click += (_, _) => ToggleFloating();
 
+        // Gauges: which limits are drawn. The last one on cannot be switched off.
+        var gauges = new ToolStripMenuItem("Gauges");
+        ToolStripMenuItem GaugeItem(string text, Gauge k) => new(text, null, (_, _) =>
+        {
+            bool on = Gauges.IsOn(k);
+            if (on && Gauges.OnCount <= 1) return;
+            switch (k)
+            {
+                case Gauge.Session: S.ShowSession = !on; break;
+                case Gauge.Week: S.ShowWeek = !on; break;
+                default: S.ShowModel = !on; break;
+            }
+        });
+        var gSession = GaugeItem("Session (5 h)", Gauge.Session);
+        var gWeek = GaugeItem("Week (all models)", Gauge.Week);
+        var gModel = GaugeItem("Model week", Gauge.Model);
+        gauges.DropDownItems.AddRange(new ToolStripItem[] { gSession, gWeek, gModel });
+
         var style = new ToolStripMenuItem("Gauge style");
         var oneLine = new ToolStripMenuItem("One line", null, (_, _) => S.FloatStyle = "line");
         var square = new ToolStripMenuItem("Square", null, (_, _) => S.FloatStyle = "square");
@@ -1690,7 +1786,7 @@ class App : ApplicationContext
 
         menu.Items.AddRange(new ToolStripItem[]
         {
-            floatItem, style, centre, new ToolStripSeparator(),
+            floatItem, gauges, style, centre, new ToolStripSeparator(),
             metric, pctItem, warn, new ToolStripSeparator(),
             autoUpd, checkNow, login, new ToolStripSeparator(),
             updateItem,
@@ -1704,6 +1800,11 @@ class App : ApplicationContext
         menu.Opening += (_, _) =>
         {
             floatItem.Checked = floatForm.Visible;
+            foreach (var (item, k) in new[] { (gSession, Gauge.Session), (gWeek, Gauge.Week), (gModel, Gauge.Model) })
+            {
+                item.Checked = Gauges.IsOn(k);
+                item.Enabled = !(item.Checked && Gauges.OnCount <= 1);
+            }
             var fs = S.FloatStyle;
             oneLine.Checked = fs != "square" && fs != "rings";
             square.Checked = fs == "square";

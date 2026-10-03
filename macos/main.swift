@@ -47,6 +47,62 @@ struct UsageSnapshot: Equatable {
     func modelName(_ e: LimitEntry) -> String { Self.modelName(e) }
 }
 
+// Which of the three limits are drawn as gauges (popover ring row and the
+// three floating styles). Preferences showSession / showWeek / showModel,
+// absent = on. The menu-bar metric, status export, scoped bars and sparkline
+// are not affected.
+enum GaugeKind: Hashable { case session, week, model }
+
+struct GaugeSelection: Equatable {
+    var session = true
+    var week = true
+    var model = true
+
+    static var current: GaugeSelection {
+        let d = UserDefaults.standard
+        return GaugeSelection(session: d.object(forKey: "showSession") as? Bool ?? true,
+                              week: d.object(forKey: "showWeek") as? Bool ?? true,
+                              model: d.object(forKey: "showModel") as? Bool ?? true)
+    }
+
+    // Preview helper: letters from "swm" name the ON set.
+    init(letters: String) {
+        session = letters.contains("s")
+        week = letters.contains("w")
+        model = letters.contains("m")
+    }
+    init(session: Bool = true, week: Bool = true, model: Bool = true) {
+        self.session = session; self.week = week; self.model = model
+    }
+
+    var onCount: Int { [session, week, model].filter { $0 }.count }
+
+    private func visible(_ snap: UsageSnapshot, _ order: [GaugeKind]) -> [GaugeKind] {
+        let v = order.filter { k in
+            switch k {
+            case .session: return session
+            case .week:    return week
+            case .model:   return model && snap.primaryModel != nil
+            }
+        }
+        return v.isEmpty ? [.session] : v   // nothing usable enabled -> session
+    }
+    // Outside-in order of the rings disc.
+    func rings(_ snap: UsageSnapshot) -> [GaugeKind] { visible(snap, [.week, .model, .session]) }
+    // Left-to-right order of the popover row and the mini rings.
+    func row(_ snap: UsageSnapshot) -> [GaugeKind] { visible(snap, [.session, .week, .model]) }
+}
+
+extension UsageSnapshot {
+    func entry(_ k: GaugeKind) -> LimitEntry? {
+        switch k {
+        case .session: return session
+        case .week:    return weeklyAll
+        case .model:   return primaryModel
+        }
+    }
+}
+
 // Floating-gauge layout preference: "line" | "square" | "rings". Stored under
 // `floatStyle`; an absent key migrates from the older `floatSquare` bool.
 enum FloatStyle {
@@ -930,6 +986,13 @@ struct PopoverView: View {
     @AppStorage("warnThreshold") private var warnThreshold = 90.0
     @AppStorage("statusExportEnabled") private var statusExportEnabled = true
     @AppStorage("autoUpdateCheck") private var autoUpdateCheck = true
+    @AppStorage("showSession") private var showSession = true
+    @AppStorage("showWeek") private var showWeek = true
+    @AppStorage("showModel") private var showModel = true
+    var forceSel: GaugeSelection? = nil   // previews: don't touch user defaults
+    private var sel: GaugeSelection {
+        forceSel ?? GaugeSelection(session: showSession, week: showWeek, model: showModel)
+    }
 
     // Waiting state lasts 3 minutes; the model clears signInLaunchedAt when its
     // fast poll ends, the date check covers any lag.
@@ -942,6 +1005,32 @@ struct PopoverView: View {
         .buttonStyle(.borderedProminent)
         .controlSize(.small)
         .disabled(waiting)
+    }
+
+    // Only the selected gauges, left to right: session, week, model. Fewer
+    // gauges grow (72 / 84 / 96) and stay centred; sublabels break at the "·".
+    private func ringRow(_ snap: UsageSnapshot) -> some View {
+        let kinds = sel.row(snap)
+        let size: CGFloat = kinds.count >= 3 ? 72 : (kinds.count == 2 ? 84 : 96)
+        let textWidth: CGFloat = kinds.count >= 3 ? 92 : (kinds.count == 2 ? 110 : 130)
+        return HStack(alignment: .top, spacing: 14) {
+            ForEach(kinds, id: \.self) { k in
+                if let e = snap.entry(k) {
+                    RingGauge(percent: e.percent, label: ringLabel(k, e, snap),
+                              sublabel: twoLine(resetText(e.resetsAt)),
+                              size: size, textWidth: textWidth)
+                }
+            }
+        }
+        .frame(maxWidth: .infinity)
+    }
+
+    private func ringLabel(_ k: GaugeKind, _ e: LimitEntry, _ snap: UsageSnapshot) -> String {
+        switch k {
+        case .session: return "Session"
+        case .week:    return "Week (all)"
+        case .model:   return "Week (\(snap.modelName(e)))"
+        }
     }
 
     var body: some View {
@@ -960,38 +1049,7 @@ struct PopoverView: View {
 
             if let snap = model.snapshot {
                 TimelineView(.periodic(from: .now, by: 30)) { _ in
-                    if let m = snap.primaryModel {
-                        // Three rings: sublabels break at the "·" into two lines.
-                        HStack(alignment: .top, spacing: 14) {
-                            if let s = snap.session {
-                                RingGauge(percent: s.percent, label: "Session",
-                                          sublabel: twoLine(resetText(s.resetsAt)),
-                                          size: 72, textWidth: 92)
-                            }
-                            if let w = snap.weeklyAll {
-                                RingGauge(percent: w.percent, label: "Week (all)",
-                                          sublabel: twoLine(resetText(w.resetsAt)),
-                                          size: 72, textWidth: 92)
-                            }
-                            RingGauge(percent: m.percent, label: "Week (\(snap.modelName(m)))",
-                                      sublabel: twoLine(resetText(m.resetsAt)),
-                                      size: 72, textWidth: 92)
-                        }
-                        .frame(maxWidth: .infinity)
-                    } else {
-                        HStack(alignment: .top, spacing: 18) {
-                            Spacer(minLength: 0)
-                            if let s = snap.session {
-                                RingGauge(percent: s.percent, label: "Session",
-                                          sublabel: resetText(s.resetsAt))
-                            }
-                            if let w = snap.weeklyAll {
-                                RingGauge(percent: w.percent, label: "Week (all)",
-                                          sublabel: resetText(w.resetsAt))
-                            }
-                            Spacer(minLength: 0)
-                        }
-                    }
+                    ringRow(snap)
                 }
                 // The first model is a ring now; bars cover any further ones.
                 if snap.scoped.count > 1 {
@@ -1071,6 +1129,14 @@ struct PopoverView: View {
                     Toggle("Desktop gauge", isOn: Binding(
                         get: { showFloating },
                         set: { _ in controller.toggleFloatingWindow() }))
+                    Menu("Gauges") {
+                        Toggle("Session (5 h)", isOn: $showSession)
+                            .disabled(showSession && !showWeek && !showModel)
+                        Toggle("Week (all models)", isOn: $showWeek)
+                            .disabled(showWeek && !showSession && !showModel)
+                        Toggle("Model week", isOn: $showModel)
+                            .disabled(showModel && !showSession && !showWeek)
+                    }
                     Picker("Gauge style", selection: $floatStyle) {
                         Text("One line").tag("line")
                         Text("Square").tag("square")
@@ -1125,6 +1191,13 @@ struct FloatingView: View {
     @ObservedObject var model: UsageModel
     @AppStorage("floatStyle") private var storedStyle = FloatStyle.current
     @AppStorage("ringsCentre") private var storedCentre = "week"
+    @AppStorage("showSession") private var showSession = true
+    @AppStorage("showWeek") private var showWeek = true
+    @AppStorage("showModel") private var showModel = true
+    var forceSel: GaugeSelection? = nil
+    private var sel: GaugeSelection {
+        forceSel ?? GaugeSelection(session: showSession, week: showWeek, model: showModel)
+    }
     var forceStyle: String? = nil   // previews: don't depend on (or touch) user defaults
     var forceCentre: String? = nil
     private var centre: String { forceCentre ?? storedCentre }
@@ -1168,8 +1241,9 @@ struct FloatingView: View {
     }
 
     // Rings: Apple-Watch-style concentric arcs. Outer = week (all models),
-    // middle = primary per-model week, inner = session. Centre stacks the
-    // percentages in the same order. Without a per-model limit: two rings.
+    // middle = primary per-model week, inner = session; only the selected
+    // gauges (and the model one only if it exists). Centre stacks the
+    // percentages in the same order.
     private func ringsLayout(_ snap: UsageSnapshot) -> some View {
         let week = snap.weeklyAll?.percent ?? 0
         let sess = snap.session?.percent ?? 0
@@ -1177,24 +1251,23 @@ struct FloatingView: View {
         var tip = ["Session \(Int(sess.rounded()))% · \(resetText(snap.session?.resetsAt))",
                    "Week \(Int(week.rounded()))% · \(resetText(snap.weeklyAll?.resetsAt))"]
         if let m { tip.append("\(snap.modelName(m)) \(Int(m.percent.rounded()))% · \(resetText(m.resetsAt))") }
+        // Visible rings from outside in (week, model, session): 108 / 84 / 60.
+        let kinds = sel.rings(snap)
+        let diameters: [CGFloat] = [108, 84, 60]
+        func pct(_ k: GaugeKind) -> Double { snap.entry(k)?.percent ?? 0 }
         return ZStack {
-            ringArc(week, diameter: 108)
-            if let m {
-                ringArc(m.percent, diameter: 84)
-                ringArc(sess, diameter: 60)
-            } else {
-                ringArc(sess, diameter: 84)
+            ForEach(Array(kinds.enumerated()), id: \.element) { i, k in
+                ringArc(pct(k), diameter: diameters[i])
             }
-            // "week" (default): week largest on top, session smallest at the
-            // bottom; "session" reverses it. Lines are cap-height tight so the
-            // stack fits the 42 pt hole inside the innermost ring.
-            let sessFirst = centre == "session"
-            let top = sessFirst ? sess : week
-            let bottom = sessFirst ? week : sess
+            // "week" (default): outermost on top, innermost at the bottom;
+            // "session" reverses it. Lines are cap-height tight so the stack
+            // fits the hole inside the innermost ring. Sizes follow position.
+            let ordered = centre == "session" ? Array(kinds.reversed()) : kinds
+            let fonts: [CGFloat] = kinds.count >= 3 ? [19, 15, 12] : (kinds.count == 2 ? [19, 13] : [22])
             VStack(spacing: 1) {
-                ringNumber(top, 19)
-                if let m { ringNumber(m.percent, 15) }
-                ringNumber(bottom, m == nil ? 13 : 12)
+                ForEach(Array(ordered.enumerated()), id: \.element) { i, k in
+                    ringNumber(pct(k), fonts[i])
+                }
             }
         }
         .frame(width: 108, height: 108)
@@ -1208,6 +1281,12 @@ struct FloatingView: View {
         let d = diameter - 9
         return ZStack {
             Circle().stroke(Color.primary.opacity(0.11), lineWidth: 9)
+            // Hard near-black hairline (0.8 pt each side, caps included) so
+            // amber/orange arcs don't melt into the grey disc.
+            Circle().trim(from: 0, to: t)
+                .stroke(Color.black.opacity(0.85), style: StrokeStyle(lineWidth: 10.6, lineCap: .round))
+                .rotationEffect(.degrees(-90))
+                .animation(.easeOut(duration: 0.6), value: pct)
             Circle().trim(from: 0, to: t)
                 .stroke(Sev.color(pct), style: StrokeStyle(lineWidth: 9, lineCap: .round))
                 .rotationEffect(.degrees(-90))
@@ -1217,19 +1296,14 @@ struct FloatingView: View {
     }
 
     private func ringNumber(_ pct: Double, _ size: CGFloat) -> some View {
-        Text("\(Int(pct.rounded()))")
-            .font(.system(size: size, weight: .bold, design: .rounded))
-            .monospacedDigit()
-            .foregroundStyle(Sev.color(pct))
+        OutlinedNumber(text: "\(Int(pct.rounded()))", size: size, color: Sev.nsColor(pct))
             .frame(height: size * 0.70)
     }
 
     // One line: rings on the left, title + countdown on the right.
     private func wideLayout(_ snap: UsageSnapshot) -> some View {
         HStack(spacing: 14) {
-            miniRing(snap.session, "5 h")
-            miniRing(snap.weeklyAll, "week")
-            if let m = snap.primaryModel { miniRing(m, snap.modelName(m).lowercased()) }
+            miniRings(snap)
             VStack(alignment: .leading, spacing: 2) {
                 Text("Claude").font(.system(size: 10, weight: .bold))
                     .foregroundStyle(.secondary)
@@ -1246,14 +1320,24 @@ struct FloatingView: View {
     private func squareLayout(_ snap: UsageSnapshot) -> some View {
         VStack(spacing: 7) {
             HStack(spacing: 16) {
-                miniRing(snap.session, "5 h")
-                miniRing(snap.weeklyAll, "week")
-                if let m = snap.primaryModel { miniRing(m, snap.modelName(m).lowercased()) }
+                miniRings(snap)
             }
             Text(resetText(snap.session?.resetsAt))
                 .font(.system(size: 9)).foregroundStyle(.secondary)
                 .lineLimit(1)
                 .fixedSize()
+        }
+    }
+
+    // Selected mini rings in the popover's order: session, week, model.
+    @ViewBuilder
+    private func miniRings(_ snap: UsageSnapshot) -> some View {
+        ForEach(sel.row(snap), id: \.self) { k in
+            switch k {
+            case .session: miniRing(snap.session, "5 h")
+            case .week:    miniRing(snap.weeklyAll, "week")
+            case .model:   if let m = snap.primaryModel { miniRing(m, snap.modelName(m).lowercased()) }
+            }
         }
     }
 
@@ -1281,6 +1365,94 @@ struct FloatingView: View {
     }
 }
 
+// Centre number of the rings disc: filled in the ring colour with a fine black
+// outline. SwiftUI Text can't stroke glyphs, so this wraps NSTextFields with
+// attributed strings: a stroke-only layer (strokeWidth +6 = 6 % of the point
+// size, black) under a fill-only layer in the ring colour. A single fill+stroke
+// string (negative strokeWidth) centres the stroke on the glyph edge and eats
+// into the digit; stacking the layers leaves the full bold fill with the
+// outline hugging it from outside.
+struct OutlinedNumber: NSViewRepresentable {
+    let text: String
+    let size: CGFloat
+    let color: NSColor
+
+    private func attributed(stroke: Bool) -> NSAttributedString {
+        var desc = NSFont.systemFont(ofSize: size, weight: .bold).fontDescriptor
+        if let rounded = desc.withDesign(.rounded) { desc = rounded }
+        desc = desc.addingAttributes([.featureSettings: [[
+            NSFontDescriptor.FeatureKey.typeIdentifier: kNumberSpacingType,
+            NSFontDescriptor.FeatureKey.selectorIdentifier: kMonospacedNumbersSelector]]])
+        let font = NSFont(descriptor: desc, size: size) ?? .systemFont(ofSize: size, weight: .bold)
+        if stroke {
+            return NSAttributedString(string: text, attributes: [
+                .font: font,
+                .foregroundColor: NSColor.black,
+                .strokeColor: NSColor.black,
+                .strokeWidth: 6,
+            ])
+        }
+        return NSAttributedString(string: text, attributes: [.font: font, .foregroundColor: color])
+    }
+
+    func makeNSView(context: Context) -> OutlinedNumberHost {
+        OutlinedNumberHost(back: Self.label(), front: Self.label())
+    }
+
+    private static func label() -> NSTextField {
+        let f = NSTextField(labelWithString: "")
+        f.cell = ExactTextCell()
+        f.isEditable = false
+        f.isSelectable = false
+        f.isBezeled = false
+        f.isBordered = false
+        f.drawsBackground = false
+        f.alignment = .center
+        f.lineBreakMode = .byClipping
+        f.usesSingleLineMode = false   // single-line mode shifts the baseline up
+        f.cell?.wraps = false
+        return f
+    }
+
+    func updateNSView(_ host: OutlinedNumberHost, context: Context) {
+        host.back.attributedStringValue = attributed(stroke: true)
+        host.front.attributedStringValue = attributed(stroke: false)
+        host.needsLayout = true
+    }
+
+    func sizeThatFits(_ proposal: ProposedViewSize, nsView: OutlinedNumberHost, context: Context) -> CGSize? {
+        CGSize(width: ceil(attributed(stroke: false).size().width) + 4, height: size * 0.70)
+    }
+}
+
+final class ExactTextCell: NSTextFieldCell {
+    override func drawingRect(forBounds rect: NSRect) -> NSRect { rect }
+}
+
+// Both labels sit at their intrinsic size, centred in whatever frame the stack
+// gives the view (SwiftUI Text centres its line box the same way), so the
+// 0.70 × font-height rows keep their metrics.
+final class OutlinedNumberHost: NSView {
+    let back: NSTextField
+    let front: NSTextField
+    init(back: NSTextField, front: NSTextField) {
+        self.back = back
+        self.front = front
+        super.init(frame: .zero)
+        addSubview(back)
+        addSubview(front)
+    }
+    required init?(coder: NSCoder) { fatalError() }
+    override func layout() {
+        super.layout()
+        let s = front.cell!.cellSize
+        let r = NSRect(x: (bounds.width - ceil(s.width)) / 2, y: (bounds.height - ceil(s.height)) / 2,
+                       width: ceil(s.width), height: ceil(s.height))
+        back.frame = r
+        front.frame = r
+    }
+}
+
 // Window-background dragging is decided by the deepest view under the click,
 // and SwiftUI's internal views can refuse it. The gauge has no interactive
 // controls, so a transparent overlay catches every click and drives the drag
@@ -1301,6 +1473,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     private var popover: NSPopover!
     private var panel: NSPanel?
     private var lastStyle = FloatStyle.current
+    private var lastSel = GaugeSelection.current
     private var cancellables = Set<AnyCancellable>()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -1332,8 +1505,10 @@ final class AppController: NSObject, NSApplicationDelegate, NSPopoverDelegate {
                 self.updateStatusButton()
                 self.model.applyUpdatePreference()
                 let st = FloatStyle.current
-                if st != self.lastStyle {
+                let gs = GaugeSelection.current
+                if st != self.lastStyle || gs != self.lastSel {
                     self.lastStyle = st
+                    self.lastSel = gs
                     DispatchQueue.main.async { self.sizeFloatingPanel() }
                 }
             }
@@ -1443,6 +1618,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         floatItem.target = self
         floatItem.state = (panel?.isVisible == true) ? .on : .off
         menu.addItem(floatItem)
+        menu.addItem(Self.makeGaugesItem(sel: .current, target: self))
         let styleItem = NSMenuItem(title: "Gauge style", action: nil, keyEquivalent: "")
         let styleMenu = NSMenu(title: "Gauge style")
         let current = FloatStyle.current
@@ -1486,6 +1662,33 @@ final class AppController: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     @objc private func menuSetCentre(_ sender: NSMenuItem) {
         guard let key = sender.representedObject as? String else { return }
         UserDefaults.standard.set(key, forKey: "ringsCentre")
+    }
+    // "Gauges" submenu of the right-click menu: one check item per limit; the
+    // last one on is disabled so at least one gauge always stays.
+    static func makeGaugesItem(sel gs: GaugeSelection, target: AnyObject?) -> NSMenuItem {
+        let gaugesItem = NSMenuItem(title: "Gauges", action: nil, keyEquivalent: "")
+        let gaugesMenu = NSMenu(title: "Gauges")
+        gaugesMenu.autoenablesItems = false
+        for (title, key, on) in [("Session (5 h)", "showSession", gs.session),
+                                 ("Week (all models)", "showWeek", gs.week),
+                                 ("Model week", "showModel", gs.model)] {
+            let item = NSMenuItem(title: title, action: #selector(menuToggleGauge(_:)), keyEquivalent: "")
+            item.target = target
+            item.representedObject = key
+            item.state = on ? .on : .off
+            item.isEnabled = !(on && gs.onCount == 1)
+            gaugesMenu.addItem(item)
+        }
+        gaugesItem.submenu = gaugesMenu
+        return gaugesItem
+    }
+
+    @objc fileprivate func menuToggleGauge(_ sender: NSMenuItem) {
+        guard let key = sender.representedObject as? String else { return }
+        let gs = GaugeSelection.current
+        let on = UserDefaults.standard.object(forKey: key) as? Bool ?? true
+        if on && gs.onCount == 1 { return }
+        UserDefaults.standard.set(!on, forKey: key)
     }
     @objc private func menuSetStyle(_ sender: NSMenuItem) {
         guard let key = sender.representedObject as? String else { return }
@@ -1639,16 +1842,40 @@ func fakeSnapshot(withScoped: Bool = true) -> UsageSnapshot {
     return UsageSnapshot(fetchedAt: now, limits: limits)
 }
 
+// ImageRenderer can't draw AppKit-backed views (the rings' outlined numbers),
+// so rings previews go through an off-screen NSHostingView at 2x.
+@MainActor
+func renderHosted<V: View>(_ view: V) -> CGImage? {
+    let host = NSHostingView(rootView: view)
+    let win = NSWindow(contentRect: NSRect(origin: .zero, size: host.fittingSize),
+                       styleMask: [.borderless], backing: .buffered, defer: false)
+    win.contentView = host
+    host.frame = NSRect(origin: .zero, size: host.fittingSize)
+    host.layoutSubtreeIfNeeded()
+    let b = host.bounds
+    guard b.width > 0, b.height > 0,
+          let rep = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: Int(b.width * 2),
+                                     pixelsHigh: Int(b.height * 2), bitsPerSample: 8,
+                                     samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
+                                     colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0)
+    else { return nil }
+    rep.size = b.size
+    host.cacheDisplay(in: b, to: rep)
+    return rep.cgImage
+}
+
 for (flag, kind) in [("--preview-popover", "popover"), ("--preview-popover-noscoped", "noscoped"),
                      ("--preview-float-wide", "wide"), ("--preview-float-square", "square"),
                      ("--preview-float-rings", "rings"), ("--preview-float-rings-noscoped", "rings-noscoped"),
-                     ("--preview-float-rings-session", "rings-session")] {
+                     ("--preview-float-rings-session", "rings-session"),
+                     ("--preview-float-rings-dark", "rings-dark")] {
     let args = CommandLine.arguments
     guard let i = args.firstIndex(of: flag) else { continue }
     guard i + 1 < args.count else { print("usage: \(flag) <out.png>"); exit(2) }
     let out = args[i + 1]
     MainActor.assumeIsolated {
         _ = NSApplication.shared
+        if kind == "rings-dark" { NSApp.appearance = NSAppearance(named: .darkAqua) }
         let model = UsageModel()
         model.snapshot = fakeSnapshot(withScoped: kind != "noscoped" && kind != "rings-noscoped")
         model.plan = "max"
@@ -1665,7 +1892,49 @@ for (flag, kind) in [("--preview-popover", "popover"), ("--preview-popover-nosco
             var fv = FloatingView(model: model)
             fv.forceCentre = (kind == "rings-session") ? "session" : "week"
             fv.forceStyle = kind.hasPrefix("rings") ? "rings" : (kind == "square" ? "square" : "line")
-            let r = ImageRenderer(content: fv.padding(12).background(bg))
+            if kind.hasPrefix("rings") {
+                image = renderHosted(fv.padding(12).background(bg))
+            } else {
+                let r = ImageRenderer(content: fv.padding(12).background(bg))
+                r.scale = 2
+                image = r.cgImage
+            }
+        }
+        guard let cg = image,
+              let png = NSBitmapImageRep(cgImage: cg).representation(using: .png, properties: [:])
+        else { print("render failed"); exit(1) }
+        do { try png.write(to: URL(fileURLWithPath: out)) } catch { print("write failed: \(error)"); exit(1) }
+        exit(0)
+    }
+}
+
+// `--preview-popover-sel <out.png> <flags>` / `--preview-float-rings-sel <out.png> <flags>`:
+// like the previews above, with <flags> a string from "swm" (session, week,
+// model) naming the gauges that are ON. User defaults are not read or written.
+for (flag, rings) in [("--preview-popover-sel", false), ("--preview-float-rings-sel", true)] {
+    let args = CommandLine.arguments
+    guard let i = args.firstIndex(of: flag) else { continue }
+    guard i + 2 < args.count else { print("usage: \(flag) <out.png> <flags swm>"); exit(2) }
+    let out = args[i + 1]
+    let sel = GaugeSelection(letters: args[i + 2])
+    MainActor.assumeIsolated {
+        _ = NSApplication.shared
+        let model = UsageModel()
+        model.snapshot = fakeSnapshot()
+        model.plan = "max"
+        let bg = Color(nsColor: .windowBackgroundColor)
+        let image: CGImage?
+        if rings {
+            var fv = FloatingView(model: model)
+            fv.forceCentre = "week"
+            fv.forceStyle = "rings"
+            fv.forceSel = sel
+            image = renderHosted(fv.padding(12).background(bg))
+        } else {
+            var pv = PopoverView(model: model, controller: AppController())
+            pv.staticPreview = true
+            pv.forceSel = sel
+            let r = ImageRenderer(content: pv.background(bg))
             r.scale = 2
             image = r.cgImage
         }
@@ -1673,6 +1942,21 @@ for (flag, kind) in [("--preview-popover", "popover"), ("--preview-popover-nosco
               let png = NSBitmapImageRep(cgImage: cg).representation(using: .png, properties: [:])
         else { print("render failed"); exit(1) }
         do { try png.write(to: URL(fileURLWithPath: out)) } catch { print("write failed: \(error)"); exit(1) }
+        exit(0)
+    }
+}
+
+// `--selftest-gauges-menu <flags>`: print the right-click "Gauges" submenu
+// (title, checked, enabled) for the ON set <flags> ("swm" letters). No UI.
+if let i = CommandLine.arguments.firstIndex(of: "--selftest-gauges-menu") {
+    let args = CommandLine.arguments
+    guard i + 1 < args.count else { print("usage: --selftest-gauges-menu <flags swm>"); exit(2) }
+    MainActor.assumeIsolated {
+        let item = AppController.makeGaugesItem(sel: GaugeSelection(letters: args[i + 1]), target: nil)
+        print("submenu \(item.title)")
+        for m in item.submenu!.items {
+            print("\(m.title) | checked=\(m.state == .on) | enabled=\(m.isEnabled)")
+        }
         exit(0)
     }
 }

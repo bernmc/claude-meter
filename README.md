@@ -27,7 +27,7 @@ plan usage** at a glance — the same numbers as the Claude app's
   (80/90/95%, or off). Warns once per approach, re-arms after the reset.
 - **Configurable** from the gear menu: desktop gauge on/off and layout, which
   limit the icon tracks (worst limit, session, week, or model week), percent display on/off, warning threshold, update check, launch
-  at login.
+  at login. Choose which limits are drawn as gauges (Gauges in the gear menu).
 
 Works with any Claude subscription (Pro, Max, …) — it displays whatever
 limits your plan reports. Dates and times follow your system locale.
