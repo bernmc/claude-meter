@@ -98,3 +98,20 @@ Checks JSON (`scratch/rings-style-mac-checks.json`), all must be true:
 
 ## Report
 Use the fixed report format. Nothing else.
+
+## Amendment 1 (orchestrator, after spawn)
+Add a second preference so Bernard can compare both centre orderings live:
+- UserDefaults key `ringsCentre` (String): "week" (default, absent = "week") or
+  "session".
+- "week": as specified: week 19 pt top, model 15, session 12 bottom.
+- "session": reversed: session 19 pt top, model 15, week 12 bottom. Two-ring
+  case: session 19 over week 13.
+- Gear menu: `Picker("Rings centre", selection:)` bound to `ringsCentre`, labels
+  "Week largest" / "Session largest", placed directly after the Gauge style picker.
+- Right-click menu: submenu "Rings centre" with the same two items, state on for
+  the current value, placed directly after the Gauge style submenu.
+- The observer that resizes on style change also repaints on `ringsCentre`
+  change (no resize needed; SwiftUI @AppStorage will redraw, confirm it does).
+- Preview: `--preview-float-rings-session <png>` renders the "session" ordering
+  with the fake snapshot. Add it as rings-style-mac-04-session.png to the
+  screenshots and a check `rings_centre_option_both_orderings` to the checks JSON.

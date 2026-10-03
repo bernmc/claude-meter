@@ -65,3 +65,12 @@ Checks JSON (`scratch/rings-style-win-checks.json`), all must be true:
 
 ## Report
 Use the fixed report format. Nothing else.
+
+## Amendment 1 (orchestrator, after spawn)
+Add a second preference: `S.RingsCentre` string, key "ringsCentre", "week"
+(default) or "session". "week" = the centre numbers as specified (week 19 top,
+model 15, session 12). "session" = reversed (session 19 top, model 15, week 12;
+two-ring case session 19 over week 13). Menu: a submenu "Rings centre" with
+"Week largest" / "Session largest" directly after the Gauge style submenu,
+checked from `S.RingsCentre` in `menu.Opening`; selecting repaints the float.
+Add check `rings_centre_option` to the checks JSON.
