@@ -574,6 +574,9 @@ static class UpdateChecker
 
 static class Draw
 {
+    // Stroke colour of the Rings centre numbers (dark grey, full alpha).
+    public static readonly Color NumberOutline = Color.FromArgb(255, 0x3A, 0x3A, 0x3A);
+
     // outlineExtra > 0 (Rings float style): hard near-black outline arc, penW + outlineExtra wide,
     // drawn under the coloured arc in place of the soft halo.
     public static void Ring(Graphics g, RectangleF rect, float penW, double pct, float outlineExtra = 0)
@@ -609,7 +612,7 @@ static class Draw
         g.DrawString(text, font, brush, cx, cy, sf);
     }
 
-    // Filled text in `fill` with a black stroke of strokeW px centred on the glyph edge.
+    // Filled text in `fill` with a dark-grey (NumberOutline) stroke of strokeW px centred on the glyph edge.
     // `font` must be created in GraphicsUnit.Pixel (Size is then the em size in px).
     public static void CenteredOutlined(Graphics g, string text, Font font, Color fill,
                                         float strokeW, float cx, float cy)
@@ -620,7 +623,7 @@ static class Draw
         path.AddString(text, font.FontFamily, (int)font.Style, font.Size,
                        new RectangleF(cx - boxW / 2, cy - boxH / 2, boxW, boxH), sf);
         using var brush = new SolidBrush(fill);
-        using var pen = new Pen(Color.Black, strokeW) { LineJoin = LineJoin.Round };
+        using var pen = new Pen(NumberOutline, strokeW) { LineJoin = LineJoin.Round };
         g.FillPath(brush, path);
         g.DrawPath(pen, path);
     }
@@ -685,7 +688,7 @@ static class Draw
             m.Translate(-(b.X + b.Width / 2f), -(b.Y + b.Height / 2f));
             paths[i].Transform(m);
             using var brush = new SolidBrush(lines[i].Color);
-            using var pen = new Pen(Color.Black, stroke) { LineJoin = LineJoin.Round };
+            using var pen = new Pen(NumberOutline, stroke) { LineJoin = LineJoin.Round };
             g.FillPath(brush, paths[i]);
             g.DrawPath(pen, paths[i]);
             paths[i].Dispose();
@@ -1260,6 +1263,18 @@ class FloatForm : Form
         Win32.SendMessage(Handle, Win32.WM_NCLBUTTONDOWN, Win32.HTCAPTION, IntPtr.Zero);
     }
 
+    // Right-click: the same menu as the tray icon, at the cursor. The form is no-activate, so take the
+    // foreground first or the menu would not close on an outside click.
+    protected override void OnMouseUp(MouseEventArgs e)
+    {
+        base.OnMouseUp(e);
+        if (e.Button != MouseButtons.Right) return;
+        var menu = app.BuildMenu(includeRefresh: true);
+        menu.Closed += (_, _) => BeginInvoke(menu.Dispose);   // built per click — don't leak it
+        Win32.SetForegroundWindow(Handle);
+        menu.Show(Cursor.Position);
+    }
+
     protected override void WndProc(ref Message m)
     {
         if (m.Msg == Win32.WM_EXITSIZEMOVE) { S.FloatX = Left; S.FloatY = Top; }
@@ -1497,6 +1512,7 @@ static class Win32
     public static readonly IntPtr HTCAPTION = 2;
 
     [DllImport("user32.dll")] public static extern bool ReleaseCapture();
+    [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr hWnd);
     [DllImport("user32.dll")] public static extern IntPtr SendMessage(IntPtr hWnd, int msg, IntPtr wParam, IntPtr lParam);
     [DllImport("dwmapi.dll")]
     static extern int DwmSetWindowAttribute(IntPtr hwnd, int attr, ref int value, int size);
