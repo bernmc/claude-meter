@@ -10,11 +10,14 @@ Briefs for both machines live in `plans/`.
 - status-file-win: port the macOS status/current.json export to Windows. Path decision:
   `%APPDATA%\Claude Meter\status\current.json`, defaults key `statusExportPath`, same
   JSON shape as macOS (see plans/status-export.md). No brief yet.
-- three-gauges-win: brief at plans/three-gauges-win.md (built from the Mac, compile-checked
-  only; needs a runtime look on Windows).
+- three-gauges-win-look: e80b0bf landed three rings in the flyout and float, compile-checked
+  only. Run it: check the 25 px number fits the smaller L(72) ring, labels don't overflow at
+  L(104) spacing, the flyout re-widens if open when a third ring appears, "Model week" in
+  the tray menu. Fix in place if needed (brief plans/three-gauges-win.md).
 
 ## Agreed (reviewed, committed, not yet pushed)
 
 ## Done (pushed)
+- three-gauges-win: e80b0bf (runtime look still open above)
 - reauth-button 4a06a3c, reauth-401 ac32500, menu-check-margin 2377a63, signin-unify 91a3420
 - reauth-mac-verify: folded into the Mac TODO (live click still pending a real sign-out)
