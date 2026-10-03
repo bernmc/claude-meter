@@ -26,7 +26,7 @@ plan usage** at a glance — the same numbers as the Claude app's
 - **Usage warnings**: a notification when any limit crosses a threshold
   (80/90/95%, or off). Warns once per approach, re-arms after the reset.
 - **Configurable** from the gear menu: desktop gauge on/off and layout, which
-  limit the icon tracks (worst limit, session, week, or model week), percent display on/off, warning threshold, launch
+  limit the icon tracks (worst limit, session, week, or model week), percent display on/off, warning threshold, update check, launch
   at login.
 
 Works with any Claude subscription (Pro, Max, …) — it displays whatever
@@ -112,7 +112,9 @@ You should know exactly what an app near your credentials does:
   `%APPDATA%\Claude Meter\` (Windows, alongside `settings.json`).
 
 No analytics, no third-party services, no network calls other than the two
-Anthropic endpoints above.
+Anthropic endpoints above and the update check described under
+[Updates](#updates) (a public, unauthenticated request to
+`api.github.com`).
 
 > **Note:** sign in to Claude Code separately on each machine you run
 > Claude Meter on. Don't copy the credentials file between machines — refresh
@@ -124,6 +126,36 @@ Claude Code…" button. On macOS it opens Terminal running `claude auth login`; 
 Windows the same button (tray menu or flyout) runs `claude auth login` in a console
 and offers the `winget install Anthropic.ClaudeCode` command if Claude Code isn't
 installed.
+
+## Updates
+
+Claude Meter asks GitHub Releases
+(`GET https://api.github.com/repos/bernmc/claude-meter/releases/latest`) whether
+a newer version exists. No credentials are sent. It checks 10 seconds after
+launch and then every 24 hours, and on demand from **Check for updates…** in
+the gear menu or (macOS) the right-click menu. A repo with no releases yet
+counts as up to date. The automatic check is a gear-menu toggle, **Check for
+updates automatically** (on by default).
+
+When a newer release exists you get one notification per version, and the
+popover shows "Update available: vX.Y" with a button:
+
+- **macOS**: **Update…** opens Terminal on `update.command` (written to
+  `~/Library/Application Support/Claude Meter/`), which runs `git pull --ff-only`
+  in your checkout and then `macos/build.sh --install`. This needs a checkout;
+  without one the button reads **Open release page…** and opens the release in
+  your browser. The right-click menu also gets **Update to vX.Y…**.
+- **Windows**: the button opens the release page in your browser.
+
+`defaults` keys (macOS, domain `au.bernard.claude-meter`):
+
+| Key | Type | Default |
+| --- | --- | --- |
+| `autoUpdateCheck` | bool | true |
+| `updateRepoPath` | string, path to the repo checkout (must contain `macos/build.sh`) | unset; on first launch it is set to `~/SynologyDrive/AI_Context/01-Projects/Claude_Toolkit/Claude_Meter/claude-meter` if that folder exists |
+
+`--check-update` prints `current <v>, latest <tag or none>, newer: yes/no` and
+exits 0 (exit 2 on a network error).
 
 ## Status file
 

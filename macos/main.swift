@@ -11,6 +11,12 @@ import Combine
 import ServiceManagement
 import UserNotifications
 
+enum AppVersion {
+    static var current: String {
+        (Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String) ?? "0"
+    }
+}
+
 // MARK: - Usage model
 
 struct LimitEntry: Identifiable, Equatable {
@@ -482,6 +488,121 @@ enum SignInLauncher {
     }
 }
 
+// MARK: - Update check
+
+// Asks GitHub Releases for the latest release. No releases yet (404) counts
+// as up to date.
+enum UpdateChecker {
+    struct Release {
+        let tag: String
+        let version: String
+        let url: URL
+        let notes: String
+    }
+
+    static func latest() async throws -> Release? {
+        var req = URLRequest(url: URL(string: "https://api.github.com/repos/bernmc/claude-meter/releases/latest")!)
+        req.timeoutInterval = 15
+        req.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
+        req.setValue("ClaudeMeter/\(AppVersion.current)", forHTTPHeaderField: "User-Agent")
+        let (data, resp) = try await URLSession.shared.data(for: req)
+        let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
+        if code == 404 { return nil }
+        guard code == 200 else { throw APIError.httpError(code) }
+        guard let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let tag = obj["tag_name"] as? String,
+              let html = obj["html_url"] as? String,
+              let url = URL(string: html) else { throw APIError.badPayload }
+        let version = tag.hasPrefix("v") ? String(tag.dropFirst()) : tag
+        return Release(tag: tag, version: version, url: url, notes: (obj["body"] as? String) ?? "")
+    }
+
+    // Numeric, component by component; a leading "v" is ignored and missing
+    // components count as 0 ("1.1" == "1.1.0").
+    static func isNewer(_ a: String, than b: String) -> Bool {
+        func parts(_ v: String) -> [Int] {
+            let t = v.hasPrefix("v") ? String(v.dropFirst()) : v
+            return t.split(separator: ".", omittingEmptySubsequences: false)
+                .map { Int($0.prefix(while: \.isNumber)) ?? 0 }
+        }
+        let x = parts(a), y = parts(b)
+        for i in 0..<max(x.count, y.count) {
+            let p = i < x.count ? x[i] : 0, q = i < y.count ? y[i] : 0
+            if p != q { return p > q }
+        }
+        return false
+    }
+}
+
+// "Update…": with a usable repo checkout, opens Terminal on a script that
+// pulls and rebuilds (same NSWorkspace .command pattern as SignInLauncher);
+// otherwise opens the release page.
+enum UpdateLauncher {
+    static let defaultRepo = "~/SynologyDrive/AI_Context/01-Projects/Claude_Toolkit/Claude_Meter/claude-meter"
+
+    static func scriptURL() -> URL {
+        FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("Claude Meter", isDirectory: true)
+            .appendingPathComponent("update.command")
+    }
+
+    // First launch only: adopt Bernard's checkout when it exists.
+    static func seedRepoPath() {
+        let d = UserDefaults.standard
+        guard d.string(forKey: "updateRepoPath") == nil else { return }
+        let path = (defaultRepo as NSString).expandingTildeInPath
+        var isDir: ObjCBool = false
+        if FileManager.default.fileExists(atPath: path, isDirectory: &isDir), isDir.boolValue {
+            d.set(path, forKey: "updateRepoPath")
+        }
+    }
+
+    // The configured checkout, only if it contains macos/build.sh.
+    static func repoPath() -> String? {
+        guard let raw = UserDefaults.standard.string(forKey: "updateRepoPath"), !raw.isEmpty else { return nil }
+        let path = (raw as NSString).expandingTildeInPath
+        let build = (path as NSString).appendingPathComponent("macos/build.sh")
+        return FileManager.default.fileExists(atPath: build) ? path : nil
+    }
+
+    static func scriptBody(for path: String) -> String {
+        var q = ""
+        for ch in path {
+            if "\\\"$`".contains(ch) { q.append("\\") }
+            q.append(ch)
+        }
+        return """
+        #!/bin/zsh -l
+        cd "\(q)" || exit 1
+        echo "Updating Claude Meter from GitHub…"
+        git pull --ff-only
+        cd macos && ./build.sh --install
+        echo
+        echo "Done. You can close this window."
+
+        """
+    }
+
+    @discardableResult
+    static func writeScript(for path: String) throws -> URL {
+        let url = scriptURL()
+        try FileManager.default.createDirectory(at: url.deletingLastPathComponent(),
+                                                withIntermediateDirectories: true)
+        try scriptBody(for: path).write(to: url, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: url.path)
+        return url
+    }
+
+    static func launch(releaseURL: URL?) {
+        if let path = repoPath() {
+            guard let url = try? writeScript(for: path) else { return }
+            NSWorkspace.shared.open(url)
+        } else if let releaseURL {
+            NSWorkspace.shared.open(releaseURL)
+        }
+    }
+}
+
 // MARK: - Observable model
 
 @MainActor
@@ -492,9 +613,14 @@ final class UsageModel: ObservableObject {
     @Published var refreshing = false
     @Published var needsSignIn = false
     @Published var signInLaunchedAt: Date?
+    @Published var availableUpdate: UpdateChecker.Release?
+    @Published var updateStatus: String?
     let history = HistoryStore()
     private var timer: Timer?
     private var fastTimer: Timer?
+    private var updateTimer: Timer?
+    private var updateKickoff: Task<Void, Never>?
+    private var statusClear: Task<Void, Never>?
 
     // Opens the sign-in Terminal window, then polls every 5 s until the fetch
     // recovers or 3 minutes pass. The 60 s timer is unaffected.
@@ -528,6 +654,64 @@ final class UsageModel: ObservableObject {
             Task { await self?.refresh() }
         }
         timer?.tolerance = 10
+        applyUpdatePreference(launch: true)
+    }
+
+    // Starts or stops the 24 h update timer to match "autoUpdateCheck"
+    // (absent = on). Idempotent: AppController calls it from the
+    // UserDefaults.didChangeNotification observer on every preference change.
+    // `launch` adds the one-shot check 10 s after startup.
+    func applyUpdatePreference(launch: Bool = false) {
+        let d = UserDefaults.standard
+        let on = d.object(forKey: "autoUpdateCheck") == nil ? true : d.bool(forKey: "autoUpdateCheck")
+        if on, updateTimer == nil {
+            if launch {
+                updateKickoff = Task { [weak self] in
+                    try? await Task.sleep(nanoseconds: 10_000_000_000)
+                    guard !Task.isCancelled else { return }
+                    await self?.checkForUpdates(manual: false)
+                }
+            }
+            updateTimer = Timer.scheduledTimer(withTimeInterval: 24 * 3600, repeats: true) { [weak self] _ in
+                Task { await self?.checkForUpdates(manual: false) }
+            }
+            updateTimer?.tolerance = 600
+        } else if !on, updateTimer != nil {
+            updateTimer?.invalidate()
+            updateTimer = nil
+            updateKickoff?.cancel()
+            updateKickoff = nil
+        }
+    }
+
+    private func setUpdateStatus(_ text: String) {
+        updateStatus = text
+        statusClear?.cancel()
+        statusClear = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: 6_000_000_000)
+            guard !Task.isCancelled else { return }
+            self?.updateStatus = nil
+        }
+    }
+
+    func checkForUpdates(manual: Bool) async {
+        do {
+            let latest = try await UpdateChecker.latest()
+            if let r = latest, UpdateChecker.isNewer(r.tag, than: AppVersion.current) {
+                availableUpdate = r
+                let d = UserDefaults.standard
+                if manual || d.string(forKey: "lastNotifiedUpdate") != r.tag {
+                    Notifier.post(title: "Claude Meter \(r.version) is available",
+                                  body: "You have \(AppVersion.current). Open the gauge menu to update.")
+                    d.set(r.tag, forKey: "lastNotifiedUpdate")
+                }
+            } else {
+                availableUpdate = nil
+                if manual { setUpdateStatus("Up to date (v\(AppVersion.current))") }
+            }
+        } catch {
+            if manual { setUpdateStatus("Couldn't check: \(error.localizedDescription)") }
+        }
     }
 
     private var notifiedSignIn = false
@@ -745,6 +929,7 @@ struct PopoverView: View {
     @AppStorage("menuBarShowPct") private var menuBarShowPct = true
     @AppStorage("warnThreshold") private var warnThreshold = 90.0
     @AppStorage("statusExportEnabled") private var statusExportEnabled = true
+    @AppStorage("autoUpdateCheck") private var autoUpdateCheck = true
 
     // Waiting state lasts 3 minutes; the model clears signInLaunchedAt when its
     // fast poll ends, the date check covers any lag.
@@ -838,6 +1023,19 @@ struct PopoverView: View {
                 }
             }
 
+            if let up = model.availableUpdate {
+                HStack {
+                    Text("Update available: v\(up.version)")
+                        .font(.system(size: 11, weight: .semibold))
+                    Spacer()
+                    Button(UpdateLauncher.repoPath() != nil ? "Update…" : "Open release page…") {
+                        UpdateLauncher.launch(releaseURL: up.url)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.small)
+                }
+            }
+
             Divider()
 
             HStack(spacing: 10) {
@@ -858,7 +1056,10 @@ struct PopoverView: View {
                 .buttonStyle(.plain)
                 .help("Show/hide desktop gauge")
 
-                if let snap = model.snapshot {
+                if let status = model.updateStatus {
+                    Text(status)
+                        .font(.system(size: 9.5)).foregroundStyle(.tertiary)
+                } else if let snap = model.snapshot {
                     Text("updated \(clockString(snap.fetchedAt, fmtTime))")
                         .font(.system(size: 9.5)).foregroundStyle(.tertiary)
                 }
@@ -895,6 +1096,10 @@ struct PopoverView: View {
                     }
                     Toggle("Status file", isOn: $statusExportEnabled)
                     Divider()
+                    Toggle("Check for updates automatically", isOn: $autoUpdateCheck)
+                    Button("Check for updates…") {
+                        Task { await model.checkForUpdates(manual: true) }
+                    }
                     Toggle("Launch at login", isOn: Binding(
                         get: { SMAppService.mainApp.status == .enabled },
                         set: { on in
@@ -1125,6 +1330,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSPopoverDelegate {
             MainActor.assumeIsolated {
                 guard let self else { return }
                 self.updateStatusButton()
+                self.model.applyUpdatePreference()
                 let st = FloatStyle.current
                 if st != self.lastStyle {
                     self.lastStyle = st
@@ -1134,6 +1340,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         }
 
         updateStatusButton()
+        UpdateLauncher.seedRepoPath()
         model.start()
 
         if UserDefaults.standard.object(forKey: "showFloating") == nil {
@@ -1261,6 +1468,10 @@ final class AppController: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         centreItem.submenu = centreMenu
         menu.addItem(centreItem)
         menu.addItem(.separator())
+        if let up = model.availableUpdate {
+            menu.addItem(withTitle: "Update to v\(up.version)…", action: #selector(menuUpdate), keyEquivalent: "").target = self
+        }
+        menu.addItem(withTitle: "Check for updates…", action: #selector(menuCheckUpdates), keyEquivalent: "").target = self
         menu.addItem(withTitle: "Quit Claude Meter", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         statusItem.menu = menu
         statusItem.button?.performClick(nil)
@@ -1270,6 +1481,8 @@ final class AppController: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     @objc private func menuSignIn() { model.startSignIn() }
     @objc private func menuRefresh() { Task { await model.refresh() } }
     @objc private func menuToggleFloat() { toggleFloatingWindow() }
+    @objc private func menuUpdate() { UpdateLauncher.launch(releaseURL: model.availableUpdate?.url) }
+    @objc private func menuCheckUpdates() { Task { await model.checkForUpdates(manual: true) } }
     @objc private func menuSetCentre(_ sender: NSMenuItem) {
         guard let key = sender.representedObject as? String else { return }
         UserDefaults.standard.set(key, forKey: "ringsCentre")
@@ -1462,6 +1675,52 @@ for (flag, kind) in [("--preview-popover", "popover"), ("--preview-popover-nosco
         do { try png.write(to: URL(fileURLWithPath: out)) } catch { print("write failed: \(error)"); exit(1) }
         exit(0)
     }
+}
+
+// `--preview-update <out.png>`: the popover with the fake snapshot plus a fake
+// available update. No network, no keychain.
+if let i = CommandLine.arguments.firstIndex(of: "--preview-update") {
+    let args = CommandLine.arguments
+    guard i + 1 < args.count else { print("usage: --preview-update <out.png>"); exit(2) }
+    let out = args[i + 1]
+    MainActor.assumeIsolated {
+        _ = NSApplication.shared
+        let model = UsageModel()
+        model.snapshot = fakeSnapshot()
+        model.plan = "max"
+        model.availableUpdate = UpdateChecker.Release(
+            tag: "v9.9", version: "9.9",
+            url: URL(string: "https://github.com/bernmc/claude-meter/releases")!, notes: "")
+        var pv = PopoverView(model: model, controller: AppController())
+        pv.staticPreview = true
+        let r = ImageRenderer(content: pv.background(Color(nsColor: .windowBackgroundColor)))
+        r.scale = 2
+        guard let cg = r.cgImage,
+              let png = NSBitmapImageRep(cgImage: cg).representation(using: .png, properties: [:])
+        else { print("render failed"); exit(1) }
+        do { try png.write(to: URL(fileURLWithPath: out)) } catch { print("write failed: \(error)"); exit(1) }
+        exit(0)
+    }
+}
+
+// `--check-update`: one GitHub Releases lookup, no UI, no state written.
+// Exit 0 on success (including "no releases yet"), 2 on network/API error.
+if CommandLine.arguments.contains("--check-update") {
+    let sem = DispatchSemaphore(value: 0)
+    var exitCode: Int32 = 0
+    Task {
+        do {
+            let r = try await UpdateChecker.latest()
+            let newer = r.map { UpdateChecker.isNewer($0.tag, than: AppVersion.current) } ?? false
+            print("current \(AppVersion.current), latest \(r?.tag ?? "none"), newer: \(newer ? "yes" : "no")")
+        } catch {
+            print("ERROR: \(error.localizedDescription)")
+            exitCode = 2
+        }
+        sem.signal()
+    }
+    sem.wait()
+    exit(exitCode)
 }
 
 // `--signin-script-dryrun`: write the sign-in script, print path + contents,

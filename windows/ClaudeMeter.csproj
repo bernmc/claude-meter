@@ -12,7 +12,7 @@
     <!-- Lets the project restore/build on macOS/Linux too (compile-check only;
          WinForms apps still need Windows to run). -->
     <EnableWindowsTargeting>true</EnableWindowsTargeting>
-    <Version>1.0.0</Version>
+    <Version>1.2.0</Version>
   </PropertyGroup>
 
 </Project>

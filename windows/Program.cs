@@ -105,6 +105,9 @@ static class S
     public static int FloatX          { get => Get("floatX", int.MinValue);set => Set("floatX", value); }
     public static int FloatY          { get => Get("floatY", int.MinValue);set => Set("floatY", value); }
 
+    public static bool AutoUpdateCheck { get => Get("autoUpdateCheck", true); set => Set("autoUpdateCheck", value); }
+    public static string LastNotifiedUpdate { get => Get("lastNotifiedUpdate", ""); set => Set("lastNotifiedUpdate", value); }
+
     public static bool GetWarned(string id) => Get("warned-" + id, false);
     public static void SetWarned(string id, bool v) => Set("warned-" + id, v);
 }
@@ -418,12 +421,16 @@ static class Theme
 // Balloon tip when a limit crosses the configured threshold (default 90%,
 // 0 = off); re-arms once it drops 5 points below, so each approach warns once.
 
+enum BalloonKind { SignIn, Update, UsageWarning, Other }
+
 static class Notifier
 {
-    public static void Check(UsageSnapshot snap, NotifyIcon tray)
+    // Returns true when at least one warning balloon was shown.
+    public static bool Check(UsageSnapshot snap, NotifyIcon tray)
     {
+        bool shown = false;
         var threshold = S.WarnThreshold;
-        if (threshold <= 0) return;
+        if (threshold <= 0) return false;
         foreach (var l in snap.Limits)
         {
             if (l.Percent >= threshold && !S.GetWarned(l.Id))
@@ -431,12 +438,80 @@ static class Notifier
                 S.SetWarned(l.Id, true);
                 tray.ShowBalloonTip(10000, $"Claude usage at {Math.Round(l.Percent)}%",
                                     $"{l.Label} — {Fmt.ResetText(l.ResetsAt)}", ToolTipIcon.Warning);
+                shown = true;
             }
             else if (l.Percent < threshold - 5 && S.GetWarned(l.Id))
             {
                 S.SetWarned(l.Id, false);
             }
         }
+        return shown;
+    }
+}
+
+// ───────────────────────────── Update check ─────────────────────────────
+// Looks at the latest GitHub Release; never downloads or installs anything.
+
+static class AppVersion
+{
+    // Assembly informational/file version trimmed to "major.minor[.patch]".
+    public static readonly string Current = Compute();
+    static string Compute()
+    {
+        try
+        {
+            var asm = System.Reflection.Assembly.GetEntryAssembly() ?? typeof(AppVersion).Assembly;
+            var info = (Attribute.GetCustomAttribute(asm,
+                typeof(System.Reflection.AssemblyInformationalVersionAttribute))
+                as System.Reflection.AssemblyInformationalVersionAttribute)?.InformationalVersion;
+            var m = System.Text.RegularExpressions.Regex.Match(info ?? "", @"^\d+(\.\d+){0,2}");
+            if (m.Success) return m.Value;
+            return asm.GetName().Version?.ToString(3) ?? "0";
+        }
+        catch { return "0"; }
+    }
+}
+
+record Release(string Tag, string Version, string Url, string Notes);
+
+static class UpdateChecker
+{
+    const string Api = "https://api.github.com/repos/bernmc/claude-meter/releases/latest";
+    static readonly HttpClient http = new() { Timeout = TimeSpan.FromSeconds(15) };
+
+    // null = no releases yet (404), i.e. up to date.
+    public static async Task<Release?> Latest()
+    {
+        var req = new HttpRequestMessage(HttpMethod.Get, Api);
+        req.Headers.TryAddWithoutValidation("Accept", "application/vnd.github+json");
+        req.Headers.TryAddWithoutValidation("User-Agent", "ClaudeMeter/" + AppVersion.Current);
+        using var resp = await http.SendAsync(req);
+        int code = (int)resp.StatusCode;
+        if (code == 404) return null;
+        if (code != 200) throw new ApiException($"GitHub returned HTTP {code}.");
+        var text = await resp.Content.ReadAsStringAsync();
+        JsonObject? obj;
+        try { obj = JsonNode.Parse(text) as JsonObject; }
+        catch { throw new ApiException("Unexpected response from GitHub."); }
+        if ((string?)obj?["tag_name"] is not string tag || (string?)obj["html_url"] is not string url)
+            throw new ApiException("Unexpected response from GitHub.");
+        return new Release(tag, tag.TrimStart('v', 'V'), url, (string?)obj["body"] ?? "");
+    }
+
+    // True when version a is newer than b: leading "v" stripped, numeric per
+    // component, missing components = 0.
+    public static bool IsNewer(string a, string b)
+    {
+        static int[] Parts(string v) => v.Trim().TrimStart('v', 'V').Split('.')
+            .Select(p => int.TryParse(new string(p.TakeWhile(char.IsDigit).ToArray()), out var n) ? n : 0)
+            .ToArray();
+        var x = Parts(a); var y = Parts(b);
+        for (int i = 0; i < Math.Max(x.Length, y.Length); i++)
+        {
+            int xi = i < x.Length ? x[i] : 0, yi = i < y.Length ? y[i] : 0;
+            if (xi != yi) return xi > yi;
+        }
+        return false;
     }
 }
 
@@ -527,7 +602,7 @@ static class TrayIconRenderer
 class FlyoutForm : Form
 {
     readonly App app;
-    Rectangle refreshRect, gaugeRect, gearRect, signInRect;
+    Rectangle refreshRect, gaugeRect, gearRect, signInRect, updateRect;
     bool gearMenuOpen;
     bool ShowSignIn => app.AuthRequired && app.ErrorText != null;
 
@@ -599,6 +674,7 @@ class FlyoutForm : Form
             y += (int)Math.Ceiling(sz.Height) + L(ShowSignIn ? 8 : 12);
             if (ShowSignIn) y += L(28) + L(12);               // sign-in button
         }
+        if (app.AvailableUpdate != null) y += L(20) + L(12);  // update row
         y += 1 + L(12);                                       // divider
         y += L(20) + pad;                                     // footer row
         return y;
@@ -616,6 +692,7 @@ class FlyoutForm : Form
         using (var border = new Pen(Theme.Border))
             g.DrawRectangle(border, 0, 0, Width - 1, Height - 1);
         signInRect = Rectangle.Empty;
+        updateRect = Rectangle.Empty;
 
         int pad = L(14), y = pad, w = Width;
 
@@ -719,6 +796,23 @@ class FlyoutForm : Form
             }
         }
 
+        // Update row: only while a newer release is known
+        if (app.AvailableUpdate is Release upd)
+        {
+            using (var f = Fnt(11, FontStyle.Bold))
+            using (var b = new SolidBrush(Theme.Fg))
+                g.DrawString("Update available: v" + upd.Version, f, b, pad, y + L(2));
+            using (var f = Fnt(11, FontStyle.Regular))
+            using (var b = new SolidBrush(Theme.Accent))
+            {
+                const string link = "Open release page…";
+                var sz = g.MeasureString(link, f);
+                updateRect = new Rectangle(w - pad - (int)Math.Ceiling(sz.Width), y, (int)Math.Ceiling(sz.Width), L(20));
+                g.DrawString(link, f, b, updateRect.X, y + L(2));
+            }
+            y += L(20) + L(12);
+        }
+
         // Divider
         using (var p = new Pen(Theme.Border)) g.DrawLine(p, pad, y, w - pad, y);
         y += 1 + L(12);
@@ -734,11 +828,15 @@ class FlyoutForm : Form
             gearRect = new Rectangle(w - pad - L(22), y - L(2), L(22), L(22));
             Draw.Centered(g, "⚙", f, Theme.Fg2, gearRect.X + L(11), gearRect.Y + L(11));
         }
-        if (app.Snap is UsageSnapshot sn)
+        string? footerText = app.UpdateStatus ??
+            (app.Snap is UsageSnapshot sn ? "updated " + Fmt.Clock(sn.FetchedAt) : null);
+        if (footerText != null)
         {
             using var f = Fnt(9.5);
             using var b = new SolidBrush(Theme.Fg3);
-            g.DrawString("updated " + Fmt.Clock(sn.FetchedAt), f, b, pad + L(62), y + L(3));
+            using var sf = new StringFormat { Trimming = StringTrimming.EllipsisCharacter, FormatFlags = StringFormatFlags.NoWrap };
+            int tx = pad + L(62);
+            g.DrawString(footerText, f, b, new RectangleF(tx, y + L(3), gearRect.Left - L(6) - tx, L(16)), sf);
         }
     }
 
@@ -786,7 +884,8 @@ class FlyoutForm : Form
     {
         base.OnMouseMove(e);
         Cursor = refreshRect.Contains(e.Location) || gaugeRect.Contains(e.Location) ||
-                 gearRect.Contains(e.Location) || signInRect.Contains(e.Location)
+                 gearRect.Contains(e.Location) || signInRect.Contains(e.Location) ||
+                 updateRect.Contains(e.Location)
                  ? Cursors.Hand : Cursors.Default;
     }
 
@@ -796,6 +895,7 @@ class FlyoutForm : Form
         if (e.Button != MouseButtons.Left) return;
         if (refreshRect.Contains(e.Location)) app.RefreshNow();
         else if (signInRect.Contains(e.Location)) BeginInvoke(app.SignIn);
+        else if (updateRect.Contains(e.Location)) app.OpenReleasePage();
         else if (gaugeRect.Contains(e.Location)) app.ToggleFloating();
         else if (gearRect.Contains(e.Location))
         {
@@ -1336,21 +1436,33 @@ class App : ApplicationContext
     public bool AuthRequired { get; private set; }
     public bool Refreshing;
     public readonly HistoryStore History = new();
+    public Release? AvailableUpdate;
+    public string? UpdateStatus;      // transient text for manual checks
 
+    BalloonKind lastBalloon = BalloonKind.Other;
     readonly NotifyIcon tray;
     readonly FlyoutForm flyout;
     readonly FloatForm floatForm;
     readonly System.Windows.Forms.Timer pollTimer;
     readonly System.Windows.Forms.Timer tickTimer;
+    readonly System.Windows.Forms.Timer updateTimer;        // every 24 h
+    readonly System.Windows.Forms.Timer updateStartTimer;   // one-shot, 10 s after launch
+    readonly System.Windows.Forms.Timer statusTimer;        // clears UpdateStatus after 6 s
 
     public App()
     {
         Theme.Refresh();
         tray = new NotifyIcon { Visible = true, Text = "Claude Meter" };
         tray.MouseUp += (_, e) => { if (e.Button == MouseButtons.Left) ToggleFlyout(); };
-        // Only the auth balloon should launch sign-in; usage-warning balloons
-        // are only shown while AuthRequired is false.
-        tray.BalloonTipClicked += (_, _) => { if (AuthRequired) SignIn(); };
+        // Route a balloon click by the kind of the balloon shown last.
+        tray.BalloonTipClicked += (_, _) =>
+        {
+            switch (lastBalloon)
+            {
+                case BalloonKind.SignIn: SignIn(); break;
+                case BalloonKind.Update: OpenReleasePage(); break;
+            }
+        };
         tray.ContextMenuStrip = BuildMenu(includeRefresh: true);
 
         flyout = new FlyoutForm(this);
@@ -1369,6 +1481,23 @@ class App : ApplicationContext
         };
         tickTimer.Start();
 
+        updateStartTimer = new System.Windows.Forms.Timer { Interval = 10_000 };
+        updateStartTimer.Tick += (_, _) =>
+        {
+            updateStartTimer.Stop();
+            if (S.AutoUpdateCheck) CheckForUpdates(manual: false);
+        };
+        updateTimer = new System.Windows.Forms.Timer { Interval = 24 * 60 * 60 * 1000 };
+        updateTimer.Tick += (_, _) => { if (S.AutoUpdateCheck) CheckForUpdates(manual: false); };
+        statusTimer = new System.Windows.Forms.Timer { Interval = 6_000 };
+        statusTimer.Tick += (_, _) =>
+        {
+            statusTimer.Stop();
+            UpdateStatus = null;
+            flyout.Refresh(resize: false);
+        };
+        if (S.AutoUpdateCheck) { updateStartTimer.Start(); updateTimer.Start(); }
+
         S.Changed += OnSettingsChanged;
         SystemEvents.UserPreferenceChanged += (_, _) =>
         {
@@ -1386,6 +1515,8 @@ class App : ApplicationContext
     string lastStyle = S.FloatStyle;
     void OnSettingsChanged()
     {
+        if (S.AutoUpdateCheck) { if (!updateTimer.Enabled) updateTimer.Start(); }
+        else { updateTimer.Stop(); updateStartTimer.Stop(); }
         UpdateTray();
         if (S.FloatStyle != lastStyle)
         {
@@ -1406,14 +1537,17 @@ class App : ApplicationContext
             Snap = snap; Plan = plan; ErrorText = null; AuthRequired = false;
             if (snap.Session is LimitEntry s && snap.WeeklyAll is LimitEntry w)
                 History.Record(s.Percent, w.Percent);
-            Notifier.Check(snap, tray);
+            if (Notifier.Check(snap, tray)) lastBalloon = BalloonKind.UsageWarning;
         }
         catch (AuthRequiredException)
         {
             ErrorText = AuthRequiredText;
             if (!AuthRequired)
+            {
+                lastBalloon = BalloonKind.SignIn;
                 tray.ShowBalloonTip(10000, "Claude Meter can't sign in",
                                     "Click to sign in to Claude Code.", ToolTipIcon.Warning);
+            }
             AuthRequired = true;
         }
         catch (ApiException ex) { ErrorText = ex.Message; }
@@ -1422,6 +1556,51 @@ class App : ApplicationContext
         UpdateTray();
         flyout.Refresh(resize: true);
         if (floatForm.Visible) { floatForm.Relayout(); }
+    }
+
+    public async void CheckForUpdates(bool manual)
+    {
+        string? status = null;
+        try
+        {
+            var r = await UpdateChecker.Latest();
+            if (r != null && UpdateChecker.IsNewer(r.Version, AppVersion.Current))
+            {
+                AvailableUpdate = r;
+                if (manual || S.LastNotifiedUpdate != r.Tag)
+                {
+                    lastBalloon = BalloonKind.Update;
+                    tray.ShowBalloonTip(10000, $"Claude Meter {r.Version} is available",
+                        $"You have {AppVersion.Current}. Open the tray menu to update.", ToolTipIcon.Info);
+                    S.LastNotifiedUpdate = r.Tag;
+                }
+            }
+            else
+            {
+                AvailableUpdate = null;
+                if (manual) status = $"Up to date (v{AppVersion.Current})";
+            }
+        }
+        catch (Exception ex)
+        {
+            if (manual) status = "Couldn't check: " + ex.Message;
+        }
+        if (status != null)
+        {
+            UpdateStatus = status;
+            statusTimer.Stop();
+            statusTimer.Start();
+        }
+        flyout.Refresh(resize: true);
+    }
+
+    public void OpenReleasePage()
+    {
+        if (AvailableUpdate is Release r && Uri.TryCreate(r.Url, UriKind.Absolute, out var u) &&
+            u.Scheme == Uri.UriSchemeHttps)
+        {
+            try { Process.Start(new ProcessStartInfo(u.AbsoluteUri) { UseShellExecute = true }); } catch { }
+        }
     }
 
     LimitEntry? ChosenLimit() => S.TrayMetric switch
@@ -1501,6 +1680,11 @@ class App : ApplicationContext
         var w95 = new ToolStripMenuItem("95%", null, (_, _) => S.WarnThreshold = 95);
         warn.DropDownItems.AddRange(new ToolStripItem[] { wOff, w80, w90, w95 });
 
+        var autoUpd = new ToolStripMenuItem("Check for updates automatically");
+        autoUpd.Click += (_, _) => S.AutoUpdateCheck = !S.AutoUpdateCheck;
+        var checkNow = new ToolStripMenuItem("Check for updates…", null, (_, _) => CheckForUpdates(manual: true));
+        var updateItem = new ToolStripMenuItem("Update…", null, (_, _) => OpenReleasePage()) { Visible = false };
+
         var login = new ToolStripMenuItem("Launch at login");
         login.Click += (_, _) => LoginItem.Enabled = !LoginItem.Enabled;
 
@@ -1508,7 +1692,8 @@ class App : ApplicationContext
         {
             floatItem, style, centre, new ToolStripSeparator(),
             metric, pctItem, warn, new ToolStripSeparator(),
-            login, new ToolStripSeparator(),
+            autoUpd, checkNow, login, new ToolStripSeparator(),
+            updateItem,
             new ToolStripMenuItem("Quit Claude Meter", null, (_, _) => Quit()),
         });
 
@@ -1535,6 +1720,9 @@ class App : ApplicationContext
             w90.Checked = S.WarnThreshold == 90;
             w95.Checked = S.WarnThreshold == 95;
             login.Checked = LoginItem.Enabled;
+            autoUpd.Checked = S.AutoUpdateCheck;
+            updateItem.Visible = AvailableUpdate != null;
+            if (AvailableUpdate is Release ur) updateItem.Text = $"Update to v{ur.Version}…";
         };
         return menu;
     }
@@ -1571,6 +1759,26 @@ static class Program
                 }
             }
             catch (Exception ex) { Console.WriteLine("ERROR: " + ex.Message); }
+            Win32.FreeConsole();
+            return;
+        }
+
+        // `--check-update`: print current/latest version, no UI, no mutex. Exit 2 on error.
+        if (args.Contains("--check-update"))
+        {
+            Win32.AttachConsole(-1);
+            try
+            {
+                var r = UpdateChecker.Latest().GetAwaiter().GetResult();
+                bool newer = r != null && UpdateChecker.IsNewer(r.Version, AppVersion.Current);
+                Console.WriteLine();
+                Console.WriteLine($"current {AppVersion.Current}, latest {r?.Tag ?? "none"}, newer: {(newer ? "yes" : "no")}");
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine("ERROR: " + ex.Message);
+                Environment.ExitCode = 2;
+            }
             Win32.FreeConsole();
             return;
         }
