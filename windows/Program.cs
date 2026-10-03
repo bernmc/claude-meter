@@ -103,6 +103,12 @@ static class S
         Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "Claude Meter");
     static readonly string FilePath = Path.Combine(Dir, "settings.json");
     static JsonObject data = new();
+    // .NET 8: JsonNode.ToJsonString(options) with a custom options instance throws unless a TypeInfoResolver is set.
+    static readonly JsonSerializerOptions JsonOpts = new()
+    {
+        WriteIndented = true,
+        TypeInfoResolver = new System.Text.Json.Serialization.Metadata.DefaultJsonTypeInfoResolver(),
+    };
     public static event Action? Changed;
 
     static S()
@@ -127,7 +133,7 @@ static class S
         try
         {
             Directory.CreateDirectory(Dir);
-            File.WriteAllText(FilePath, data.ToJsonString(new JsonSerializerOptions { WriteIndented = true }));
+            File.WriteAllText(FilePath, data.ToJsonString(JsonOpts));
         }
         catch { }
         Changed?.Invoke();
@@ -1009,7 +1015,8 @@ class FlyoutForm : Form
 class FloatForm : Form
 {
     readonly App app;
-    readonly ToolTip tip = new();
+    // ShowAlways: the form is WS_EX_NOACTIVATE and never active, so the default (active-only) tooltip rarely showed.
+    readonly ToolTip tip = new() { ShowAlways = true };
 
     public FloatForm(App app)
     {
@@ -1084,6 +1091,7 @@ class FloatForm : Form
         var style = S.FloatStyle;
         if (style == "rings")
         {
+            Win32.DiscFrame(this, true);
             Size = new Size(L(128), L(128));
             using var disc = new GraphicsPath();
             disc.AddEllipse(0, 0, Width, Height);
@@ -1093,22 +1101,63 @@ class FloatForm : Form
         }
         else if (style == "square")
         {
+            Win32.DiscFrame(this, false);
             var old = Region;
             Region = null;
             old?.Dispose();
-            var textW = (int)Math.Ceiling(g.MeasureString(reset, f9).Width);
+            var textW = (int)Math.Ceiling(TextW(g, reset, f9));
             int w = Math.Max(L(34 * rings + 16 * (rings - 1)), textW) + L(28);
             Size = new Size(w, L(10 + 34 + 12 + 7 + 12 + 10));
         }
         else
         {
+            Win32.DiscFrame(this, false);
             var old = Region;
             Region = null;
             old?.Dispose();
-            Size = new Size(L(14 + (34 + 14) * rings + 140 + 14), L(66));
+            // left pad + rings block + gap + widest text line + right pad (= left pad)
+            var lines = OneLineText();
+            using var f10 = Fnt(10, FontStyle.Bold);
+            float textW = 0, blockH = 0;
+            for (int i = 0; i < lines.Length; i++)
+            {
+                var f = i == 0 ? f10 : f9;
+                textW = Math.Max(textW, TextW(g, lines[i], f));
+                blockH += f.GetHeight(g);
+            }
+            Size = new Size(L(14 + 48 * rings) + (int)Math.Ceiling(textW) + L(14),
+                            Math.Max(L(66), (int)Math.Ceiling(blockH) + L(16)));
         }
+        KeepOnScreen();
         tip.SetToolTip(this, TooltipText());
         Invalidate();
+    }
+
+    // Tight text width (no GDI+ side bearings), so left and right padding are exact.
+    static float TextW(Graphics g, string text, Font f)
+    {
+        using var sf = (StringFormat)StringFormat.GenericTypographic.Clone();
+        return g.MeasureString(text, f, PointF.Empty, sf).Width;
+    }
+
+    // One-line style text block: "Claude", then the reset line split into "resets in …" and the clock time.
+    string[] OneLineText()
+    {
+        var reset = Fmt.ResetText(app.Snap?.Session?.ResetsAt);
+        int i = reset.IndexOf(" · ", StringComparison.Ordinal);
+        return i < 0 ? new[] { "Claude", reset }
+                     : new[] { "Claude", reset.Substring(0, i), reset.Substring(i + 3) };
+    }
+
+    // A width change (selection, reset text, first snapshot) keeps the left edge; pull the form
+    // back inside the working area if it now overhangs.
+    void KeepOnScreen()
+    {
+        if (!Visible) return;
+        var wa = Screen.FromControl(this).WorkingArea;
+        int x = Math.Clamp(Left, wa.Left, Math.Max(wa.Left, wa.Right - Width));
+        int y = Math.Clamp(Top, wa.Top, Math.Max(wa.Top, wa.Bottom - Height));
+        if (x != Left || y != Top) Location = new Point(x, y);
     }
 
     // One line per limit, shown as the form's hover tooltip in every style.
@@ -1188,12 +1237,19 @@ class FloatForm : Form
             for (int i = 0; i < vis.Count; i++)
                 MiniRing(g, vis[i], snap, L(14 + (34 + 14) * i + 17), L(10));
             float tx = L(14 + (34 + 14) * vis.Count);
-            using (var f = Fnt(10, FontStyle.Bold))
-            using (var b = new SolidBrush(Theme.Fg2))
-                g.DrawString("Claude", f, b, tx, L(12));
-            using (var f = Fnt(9))
-            using (var b = new SolidBrush(Theme.Fg2))
-                g.DrawString(reset, f, b, new RectangleF(tx, L(27), L(140), L(28)));
+            // Text lines stacked and vertically centred in the panel.
+            var lines = OneLineText();
+            var fonts = lines.Select((_, i) => i == 0 ? Fnt(10, FontStyle.Bold) : Fnt(9)).ToArray();
+            float blockH = fonts.Sum(f => f.GetHeight(g));
+            float ty = (Height - blockH) / 2f;
+            using var tb = new SolidBrush(Theme.Fg2);
+            using var tsf = (StringFormat)StringFormat.GenericTypographic.Clone();
+            for (int i = 0; i < lines.Length; i++)
+            {
+                g.DrawString(lines[i], fonts[i], tb, tx, ty, tsf);
+                ty += fonts[i].GetHeight(g);
+                fonts[i].Dispose();
+            }
         }
     }
 
@@ -1241,6 +1297,20 @@ static class Win32
         {
             int pref = 2; // DWMWCP_ROUND
             DwmSetWindowAttribute(f.Handle, 33 /* DWMWA_WINDOW_CORNER_PREFERENCE */, ref pref, sizeof(int));
+        }
+        catch { }
+    }
+
+    // Rings float is a disc (window Region): switch off the Win11 rounded-corner frame and
+    // DWM border, which otherwise draw a rounded rectangle around the disc. Other styles keep both.
+    public static void DiscFrame(Form f, bool disc)
+    {
+        try
+        {
+            int pref = disc ? 1 /* DWMWCP_DONOTROUND */ : 2 /* DWMWCP_ROUND */;
+            DwmSetWindowAttribute(f.Handle, 33 /* DWMWA_WINDOW_CORNER_PREFERENCE */, ref pref, sizeof(int));
+            int border = unchecked((int)(disc ? 0xFFFFFFFE /* DWMWA_COLOR_NONE */ : 0xFFFFFFFF /* DWMWA_COLOR_DEFAULT */));
+            DwmSetWindowAttribute(f.Handle, 34 /* DWMWA_BORDER_COLOR */, ref border, sizeof(int));
         }
         catch { }
     }
@@ -1546,7 +1616,7 @@ class App : ApplicationContext
         tickTimer.Tick += (_, _) =>
         {
             if (flyout.Visible) flyout.Invalidate();
-            if (floatForm.Visible) floatForm.Invalidate();
+            if (floatForm.Visible) floatForm.Relayout();   // reset text length changes -> width follows
         };
         tickTimer.Start();
 
