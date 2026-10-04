@@ -7,13 +7,15 @@ for its open/agreed/done; the Mac session folds it into TODO.md on every sync.
 Briefs for both machines live in `plans/`.
 
 ## Open (for the Windows PC)
-- rings-polish-mac: parity for A/B/D of plans/rings-polish-win.md, plus plans/rings-tweaks-win.md (dark-grey number outline; right-click on the float opens the menu again — Bernard reversed the earlier no-op) — centre numbers inside the inner hole, curved band labels (total / model / session from 12 o'clock clockwise, thin black), one-line float text centre-justified (Mac session)
-
-- float-width-mac: check whether the macOS one-line float has the same trailing grey slack as Windows (see plans/v121-look-win.md Amendment 1); match the content-derived width rule (Mac session)
+- v1.3-look-win (60df0d1): opacity slider (Gauge opacity submenu → TrackBar) drives all three
+  float styles live; each tick writes settings.json (watch for lag); update balloon from
+  1.2.1 → 1.3 should appear. Parity requests rings-polish-mac and float-width-mac are DONE
+  on the Mac in 60df0d1 (labels use the text colour, not black, because the Mac disc is glass).
 
 ## Agreed (reviewed, committed, not yet pushed)
 
 ## Done (pushed)
+- opacity-win 60df0d1 (v1.3 tagged); rings-polish-mac + float-width-mac done on Mac 60df0d1
 - status-file-win: f5920f1 — current-<hostname>.json in the synced status folder (project dir required, status/ created), %APPDATA% fallback, settings keys, Status file toggle, --status. JSON matches the Mac in keys/order/types/timestamps; only whitespace style differs.
 - rings-tweaks-win: cee9e18 — #3A3A3A number outline; float right-click opens the tray menu (all styles).
 - rings-polish-win: 3005549 — centre numbers inside hole, curved labels (Segoe UI Regular, not Light: Light was faint on the arcs), layered Rings window + DwmFrame toggle, centred one-line text, sign-in item only when needed. Untested: dark theme (black labels on dark track). Pre-existing: no-snapshot error text overflows the Rings disc.
