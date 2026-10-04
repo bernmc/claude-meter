@@ -12,6 +12,7 @@ using System.Drawing.Drawing2D;
 using System.Drawing.Text;
 using System.Globalization;
 using System.Runtime.InteropServices;
+using System.Text.Encodings.Web;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using Microsoft.Win32;
@@ -162,9 +163,125 @@ static class S
 
     public static bool AutoUpdateCheck { get => Get("autoUpdateCheck", true); set => Set("autoUpdateCheck", value); }
     public static string LastNotifiedUpdate { get => Get("lastNotifiedUpdate", ""); set => Set("lastNotifiedUpdate", value); }
+    // Status file export. Path: full-path override ("" = default resolution). Enabled: absent = on.
+    public static string StatusExportPath { get => Get("statusExportPath", ""); set => Set("statusExportPath", value); }
+    public static bool StatusExportEnabled { get => Get("statusExportEnabled", true); set => Set("statusExportEnabled", value); }
 
     public static bool GetWarned(string id) => Get("warned-" + id, false);
     public static void SetWarned(string id, bool v) => Set("warned-" + id, v);
+}
+
+// ───────────────────────────── Status export ─────────────────────────────
+// Writes the current usage snapshot to a JSON file on every refresh attempt so
+// other local tooling can read live numbers without touching the credentials
+// or Anthropic's endpoint. Same document as the macOS app (StatusExporter in
+// macos/main.swift): sorted keys, ISO-8601 UTC timestamps with a trailing Z.
+// Never surfaces errors to the UI.
+
+static class StatusExporter
+{
+    static readonly JsonSerializerOptions Opts = new()
+    {
+        WriteIndented = true,
+        Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping,
+        TypeInfoResolver = new System.Text.Json.Serialization.Metadata.DefaultJsonTypeInfoResolver(),
+    };
+
+    // Seconds precision, rounded to the nearest second like Foundation's ISO8601DateFormatter
+    // (the API sends e.g. 01:59:59.9996, which the Mac writes as 02:00:00Z).
+    static JsonNode? Iso(DateTimeOffset? d)
+    {
+        if (d is not DateTimeOffset v) return null;
+        const long sec = TimeSpan.TicksPerSecond;
+        var utc = new DateTime((v.UtcDateTime.Ticks + sec / 2) / sec * sec, DateTimeKind.Utc);
+        return JsonValue.Create(utc.ToString("yyyy-MM-dd'T'HH:mm:ss'Z'", CultureInfo.InvariantCulture));
+    }
+
+    static JsonNode? LimitNode(LimitEntry? e) => e == null ? null : new JsonObject
+    {
+        ["percent"] = e.Percent,
+        ["resets_at"] = Iso(e.ResetsAt),
+    };
+
+    static JsonObject Build(UsageSnapshot? snap, string? plan, string? error) => new()
+    {
+        ["checked_at"] = Iso(DateTimeOffset.UtcNow),
+        ["error"] = error,
+        ["fetched_at"] = snap == null ? null : Iso(snap.FetchedAt),
+        ["models"] = new JsonArray((snap?.Scoped ?? new List<LimitEntry>()).Select(e => (JsonNode?)new JsonObject
+        {
+            ["name"] = UsageSnapshot.ModelName(e),
+            ["percent"] = e.Percent,
+            ["resets_at"] = Iso(e.ResetsAt),
+        }).ToArray()),
+        ["plan"] = plan,
+        ["session"] = LimitNode(snap?.Session),
+        ["weekly_all"] = LimitNode(snap?.WeeklyAll),
+    };
+
+    public static JsonObject ForSuccess(UsageSnapshot snap, string? plan) => Build(snap, plan, null);
+
+    // Keeps every prior field; only error and checked_at change. Falls back to
+    // the full schema (null fields, empty models) when no prior file is readable.
+    public static JsonObject ForFailure(string message)
+    {
+        try
+        {
+            var path = ResolvePath();
+            if (File.Exists(path) && JsonNode.Parse(File.ReadAllText(path)) is JsonObject prior)
+            {
+                prior["error"] = message;
+                prior["checked_at"] = Iso(DateTimeOffset.UtcNow);
+                return prior;
+            }
+        }
+        catch { }
+        return Build(null, null, message);
+    }
+
+    public static string Serialize(JsonObject doc) => doc.ToJsonString(Opts);
+
+    // This PC's name lower-cased, anything but a-z0-9 replaced with '-'.
+    public static string Hostname()
+    {
+        var chars = Environment.MachineName.ToLowerInvariant()
+            .Select(c => c is (>= 'a' and <= 'z') or (>= '0' and <= '9') ? c : '-').ToArray();
+        return new string(chars);
+    }
+
+    // Environment first so a test can point the exporter at another profile;
+    // GetFolderPath otherwise (same values in normal use).
+    static string Env(string name, Environment.SpecialFolder folder) =>
+        Environment.GetEnvironmentVariable(name) is { Length: > 0 } v ? v : Environment.GetFolderPath(folder);
+
+    // statusExportPath override -> synced folder (when the Claude_Meter project directory
+    // exists; status\ is created by Write) -> %APPDATA%\Claude Meter\status. One file per machine so file sync never
+    // sees two writers on one file.
+    public static string ResolvePath()
+    {
+        if (S.StatusExportPath is { Length: > 0 } custom) return custom;
+        var name = $"current-{Hostname()}.json";
+        var project = Path.Combine(Env("USERPROFILE", Environment.SpecialFolder.UserProfile),
+            "SynologyDrive", "AI_Context", "01-Projects", "Claude_Toolkit", "Claude_Meter");
+        if (Directory.Exists(project)) return Path.Combine(project, "status", name);
+        return Path.Combine(Env("APPDATA", Environment.SpecialFolder.ApplicationData),
+            "Claude Meter", "status", name);
+    }
+
+    // Atomic: temp file in the same directory, then move over the destination.
+    public static void Write(JsonObject doc)
+    {
+        try
+        {
+            var path = ResolvePath();
+            var dir = Path.GetDirectoryName(Path.GetFullPath(path));
+            if (!string.IsNullOrEmpty(dir)) Directory.CreateDirectory(dir);
+            var tmp = path + ".tmp";
+            File.WriteAllText(tmp, Serialize(doc), new System.Text.UTF8Encoding(false));
+            File.Move(tmp, path, overwrite: true);
+        }
+        catch { /* swallowed — the exporter must never crash or surface errors */ }
+    }
 }
 
 // ───────────────────────────── Credentials ─────────────────────────────
@@ -1963,9 +2080,17 @@ class App : ApplicationContext
         catch (ApiException ex) { ErrorText = ex.Message; }
         catch (Exception ex) { ErrorText = "Usage request failed: " + ex.Message; }
         finally { Refreshing = false; }
+        if (S.StatusExportEnabled) ExportCurrent();
         UpdateTray();
         flyout.Refresh(resize: true);
         if (floatForm.Visible) { floatForm.Relayout(); }
+    }
+
+    // Writes the status file for the latest refresh outcome; nothing before the first one.
+    void ExportCurrent()
+    {
+        if (ErrorText != null) StatusExporter.Write(StatusExporter.ForFailure(ErrorText));
+        else if (Snap != null) StatusExporter.Write(StatusExporter.ForSuccess(Snap, Plan));
     }
 
     public async void CheckForUpdates(bool manual)
@@ -2110,6 +2235,12 @@ class App : ApplicationContext
         var w95 = new ToolStripMenuItem("95%", null, (_, _) => S.WarnThreshold = 95);
         warn.DropDownItems.AddRange(new ToolStripItem[] { wOff, w80, w90, w95 });
 
+        var statusItem = new ToolStripMenuItem("Status file");
+        statusItem.Click += (_, _) =>
+        {
+            S.StatusExportEnabled = !S.StatusExportEnabled;
+            if (S.StatusExportEnabled) ExportCurrent();
+        };
         var autoUpd = new ToolStripMenuItem("Check for updates automatically");
         autoUpd.Click += (_, _) => S.AutoUpdateCheck = !S.AutoUpdateCheck;
         var checkNow = new ToolStripMenuItem("Check for updates…", null, (_, _) => CheckForUpdates(manual: true));
@@ -2122,7 +2253,7 @@ class App : ApplicationContext
         {
             floatItem, gauges, style, centre, new ToolStripSeparator(),
             metric, pctItem, warn, new ToolStripSeparator(),
-            autoUpd, checkNow, login, new ToolStripSeparator(),
+            statusItem, autoUpd, checkNow, login, new ToolStripSeparator(),
             updateItem,
             new ToolStripMenuItem("Quit Claude Meter", null, (_, _) => Quit()),
         });
@@ -2157,6 +2288,7 @@ class App : ApplicationContext
             w95.Checked = S.WarnThreshold == 95;
             login.Checked = LoginItem.Enabled;
             autoUpd.Checked = S.AutoUpdateCheck;
+            statusItem.Checked = S.StatusExportEnabled;
             updateItem.Visible = AvailableUpdate != null;
             if (AvailableUpdate is Release ur) updateItem.Text = $"Update to v{ur.Version}…";
         };
@@ -2224,6 +2356,30 @@ static class Program
         {
             Win32.AttachConsole(-1);
             Console.WriteLine(ClaudeCli.FindClaude() ?? "not found");
+            Win32.FreeConsole();
+            return;
+        }
+
+        // `--status`: one fetch, write the status file (ignores the enabled toggle), print the same
+        // JSON to stdout, no UI, no mutex. Exit 1 on fetch failure.
+        if (args.Contains("--status"))
+        {
+            Win32.AttachConsole(-1);
+            JsonObject doc;
+            try
+            {
+                var (snap, plan) = UsageAPI.FetchUsage().GetAwaiter().GetResult();
+                doc = StatusExporter.ForSuccess(snap, plan);
+            }
+            catch (Exception ex)
+            {
+                doc = StatusExporter.ForFailure(ex is AuthRequiredException ? App.AuthRequiredText
+                    : ex is ApiException ? ex.Message : "Usage request failed: " + ex.Message);
+                Environment.ExitCode = 1;
+            }
+            StatusExporter.Write(doc);
+            if (!Console.IsOutputRedirected) Console.WriteLine();
+            Console.WriteLine(StatusExporter.Serialize(doc));
             Win32.FreeConsole();
             return;
         }

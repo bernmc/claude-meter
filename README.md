@@ -159,10 +159,15 @@ exits 0 (exit 2 on a network error).
 
 ## Status file
 
-**macOS only, for now.** On every refresh attempt Claude Meter atomically
-writes the current snapshot to `~/SynologyDrive/AI_Context/01-Projects/
-Claude_Toolkit/Claude_Meter/status/current.json`, so other local tools can
-read live usage without touching the keychain or Anthropic's endpoint:
+macOS and Windows. On every refresh attempt Claude Meter atomically writes
+the current snapshot to `~/SynologyDrive/AI_Context/01-Projects/
+Claude_Toolkit/Claude_Meter/status/`, so other local tools can read live
+usage without touching the credentials or Anthropic's endpoint. macOS writes
+`current.json`. Windows writes `current-<hostname>.json` (hostname
+lower-cased, e.g. `current-win-cnc.json`) so each machine has its own file
+and the sync never sees two writers (the `status` folder is created if
+missing). If the `Claude_Meter` project folder itself is absent, Windows
+falls back to `%APPDATA%\Claude Meter\status\current-<hostname>.json`:
 
 ```json
 {
@@ -174,10 +179,11 @@ read live usage without touching the keychain or Anthropic's endpoint:
 }
 ```
 
-Controlled by two `defaults` keys — `statusExportPath` (string, overrides the
-path) and `statusExportEnabled` (bool, default true) — or the gear menu's
-"Status file" toggle. `--status` does a one-shot fetch, writes the file, and
-prints the same JSON to stdout.
+Controlled by two keys — `statusExportPath` (string, overrides the full path)
+and `statusExportEnabled` (bool, default true) — set with `defaults` on macOS
+or in `%APPDATA%\Claude Meter\settings.json` on Windows, or with the "Status
+file" toggle in the gear/tray menu. `--status` does a one-shot fetch, writes
+the file, and prints the same JSON to stdout.
 
 ## Disclaimer
 
