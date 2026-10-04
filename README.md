@@ -1,49 +1,53 @@
 # Claude Meter
 
-A tiny menu bar (macOS) / system tray (Windows) app that shows your **Claude
-plan usage** at a glance — the same numbers as the Claude app's
+A small menu bar (macOS) / system tray (Windows) app that shows your **Claude
+plan usage** at a glance. It shows the same numbers as the Claude app's
 *Settings → Usage* screen, without having to go looking for them.
 
 ![Claude Meter on macOS](docs/screenshot.png)
 
 ![Claude Meter on Windows](docs/screenshot-windows.png)
 
+## Floating gauge styles
+
+All styles are Liquid Glass on macOS 26 and later, frosted on older macOS, and their opacity is adjustable. Windows has the same three styles and an opacity slider.
+
+<table>
+  <tr>
+    <td align="center"><img src="docs/single.png" width="300" alt="One line floating gauge"><br>One line</td>
+    <td align="center"><img src="docs/square.png" width="300" alt="Square floating gauge"><br>Square</td>
+  </tr>
+  <tr>
+    <td align="center"><img src="docs/ring.png" width="300" alt="Rings floating gauge"><br>Rings (outer total, then the model, then the session)</td>
+    <td align="center"><img src="docs/right-click.png" width="300" alt="Right-click menu with the opacity slider"><br>Right-click menu with the opacity slider</td>
+  </tr>
+</table>
+
 ## Features
 
-- **Menu bar / tray**: a traffic-light ring (green → amber → red) for whichever
-  limit is closest to its ceiling (configurable). On macOS the percentage sits
-  next to the icon; on Windows it's drawn inside the ring.
-- **Popover / flyout** (click the icon): three animated ring gauges (the 5-hour
-  session window, the weekly limit, and the per-model weekly limit), any further
-  per-model weekly bars, reset countdowns, your plan badge, and a 24-hour usage
-  sparkline.
-- **Floating desktop gauge**: a small always-on-top panel with three mini gauges and
-  the reset countdown. Drag it anywhere; position is remembered. Three layouts:
-  one-line, square, or Apple-Watch-style concentric rings (week outside, model,
-  session inside) with the percentages stacked in the centre, sized to fit the
-  inner hole, and each ring labelled along its band (total, the model name,
-  session). Pick the layout from the gear menu or the right-click menu; "Rings
-  centre" chooses whether the week or the session number is largest. Right-click
-  anywhere on the gauge opens the same menu as the menu bar icon.
-- **Usage warnings**: a notification when any limit crosses a threshold
-  (80/90/95%, or off). Warns once per approach, re-arms after the reset.
-- **Configurable** from the gear menu: desktop gauge on/off and layout, which
-  limit the icon tracks (worst limit, session, week, or model week), percent display on/off, warning threshold, update check, launch
-  at login. Choose which limits are drawn as gauges (Gauges in the gear menu).
-  On macOS the desktop gauge's background opacity runs from clear glass to solid:
-  a slider in the right-click menu, five steps (Clear, 25 %, 50 %, 75 %, Solid)
-  in the gear menu.
+- **Menu bar / tray icon**: a ring that goes green, amber, red for the limit you choose to track (worst limit by default). On macOS the percentage sits next to the icon; on Windows it is drawn inside the ring.
+- **Three ring gauges in the popover / flyout**: the 5-hour session, the weekly limit for all models, and the per-model weekly limit. Any further per-model limits show as bars.
+- **Also in the popover**: reset countdowns, your plan badge and a 24-hour usage sparkline.
+- **Choose which limits are shown as gauges** (Gauges in the gear or tray menu).
+- **Floating desktop gauge**: an always-on-top panel you can drag anywhere; the position is remembered.
+- **Three floating styles**: one line, square, or concentric rings (week outside, then the model, then the session).
+- **Rings centre option**: choose whether the week or the session number is largest in the centre.
+- **Opacity slider** for the floating gauge: clear glass to solid on macOS (a slider in the right-click menu, five steps in the gear menu); 20% to 100% on Windows (tray menu).
+- **Usage warnings**: a notification when a limit crosses a threshold (80, 90 or 95%, or off). It warns once per approach and re-arms after the reset or a drop.
+- **One-click sign-in** when Claude Code is signed out: **Sign in to Claude Code…** runs `claude auth login` for you.
+- **Update check** against GitHub Releases, with a one-click update on macOS (see [Updates](#updates)).
+- **Status file** for other programs to read your live usage (see [Status file](#status-file)).
+- **Launch at login**, plus gear/tray menu settings for the percent display and the update check.
 
-Works with any Claude subscription (Pro, Max, …) — it displays whatever
-limits your plan reports. Dates and times follow your system locale.
+Works with any Claude subscription (Pro, Max, …). It displays whatever limits your plan reports. Dates and times follow your system locale.
 
 ## Requirements
 
 Both platforms need [Claude Code](https://claude.com/claude-code) installed
 and signed in at least once **on the same machine** (that's where the
-credentials come from).
+credentials come from). To sign in, run `claude auth login`.
 
-- **macOS**: macOS 14 or later (the desktop gauge uses Liquid Glass on macOS 26+
+- **macOS**: macOS 14 or later (the floating gauge uses Liquid Glass on macOS 26+
   and the frosted material on 14-15); Xcode Command Line Tools to build
   (`xcode-select --install`).
 - **Windows**: Windows 10 or later. To build you need the
@@ -65,7 +69,7 @@ cd claude-meter/macos
 
 That compiles a universal binary, ad-hoc signs it, installs to
 `~/Applications/Claude Meter.app`, and launches it. No Xcode project, no
-dependencies — one Swift file.
+dependencies, one Swift file.
 
 ### Windows
 
@@ -76,13 +80,13 @@ cd claude-meter\windows
 ```
 
 That compiles and installs to `%LOCALAPPDATA%\Programs\Claude Meter`, then
-launches it. No Visual Studio, no dependencies — one C# file. Add `-Portable`
+launches it. No Visual Studio, no dependencies, one C# file. Add `-Portable`
 to instead produce a self-contained exe that runs on machines without .NET
 (it targets your machine's architecture; override with `-Arch x64`/`-Arch arm64`).
 
 Prefer not to build at all? Grab the standalone exe for your architecture
 from [Releases](https://github.com/bernmc/claude-meter/releases). The exes
-are unsigned, so SmartScreen will warn on first run — "More info → Run anyway".
+are unsigned, so SmartScreen will warn on first run: "More info → Run anyway".
 
 To test the data path without the UI:
 
@@ -95,43 +99,109 @@ To test the data path without the UI:
 
 #### Sign-in expired?
 
-If the meter shows "Claude Code sign-in has expired or been revoked", click
-**Sign in to Claude Code…** in the tray menu or the flyout. If Claude Code isn't
-installed, it shows the `winget install Anthropic.ClaudeCode` command to run first.
+If the meter shows "Claude Code sign-in has expired or been revoked" or "Claude
+Code is signed out", click **Sign in to Claude Code…** in the menu or the
+popover / flyout. It runs `claude auth login`. You can also run
+`claude auth login` yourself in a terminal. On Windows, if Claude Code isn't
+installed, the button shows the `winget install Anthropic.ClaudeCode` command to
+run first.
 
-## How it works (and what it touches)
+## Is it safe to run?
 
-You should know exactly what an app near your credentials does:
+This app handles your Claude Code sign-in, so you should be able to check
+what it does rather than take it on trust. The whole app is two source
+files, `macos/main.swift` and `windows/Program.cs`, plus a build script
+per platform. A person can read them in an afternoon, and an AI assistant
+can read them in a minute.
 
-- It reads Claude Code's OAuth credentials from where Claude Code keeps them —
+**Every network destination in the code**
+
+| Host | When | What is sent |
+|---|---|---|
+| `api.anthropic.com` (usage endpoint) | every 60 s (on macOS, every 5 s for up to 3 minutes after you click Sign in) | your Claude Code access token, as a bearer header |
+| `platform.claude.com` (token endpoint) | only when the access token has expired | your refresh token, to get a new pair |
+| `api.github.com` (releases/latest) | 10 s after launch, then daily, or on demand; can be turned off | nothing but the app's version in the user-agent |
+| `github.com` | only when you click Update or Open release page | opens the page in your browser; on macOS with a checkout, Update runs `git pull` in Terminal. The app sends no data itself |
+| `code.claude.com` | only on Windows, when Claude Code is not installed and you click Open install page | opens the page in your browser; nothing sent by the app |
+
+There are no other hosts, no analytics, no crash reporting and no
+telemetry. Your tokens are sent to Anthropic's endpoints only.
+
+**Everything it writes**
+
+- Your Claude Code credential store, only to save a refreshed token pair
+  in the same format Claude Code uses (the macOS keychain item
+  `Claude Code-credentials`; on Windows the file
+  `%USERPROFILE%\.claude\.credentials.json`). On macOS it also deletes a stale
+  empty-account duplicate of that same keychain item if one exists.
+- Its own usage history in `~/Library/Application Support/Claude Meter/` (macOS), or
+  settings and usage history in `%APPDATA%\Claude Meter\` (Windows). On macOS the
+  settings are stored with `defaults`, in the domain `au.bernard.claude-meter`.
+- The optional status file described below.
+- On macOS, two small shell scripts it generates and opens in Terminal
+  when you click Sign in or Update: one runs `claude auth login`, the
+  other runs `git pull` and the build script in your checkout. You see
+  them run. On Windows, Sign in runs your installed `claude auth login` in a console
+  window; no script is generated.
+
+**Local programs it runs**
+
+macOS runs `/usr/bin/security` to read and write the keychain item, `/usr/bin/osascript` only as a notification fallback, and Terminal for the two generated scripts. Windows runs `where.exe` to find `claude`, and `claude auth login` when you click Sign in. None of these send your tokens anywhere; the sign-in and update steps contact Anthropic and GitHub, as listed above.
+
+**What it never does**
+
+It never reads any other keychain item or file, never installs anything
+persistent beyond the optional launch-at-login entry, and never contacts a
+host that is not in the table. Apart from the sign-in and update steps
+listed above, which run in a window you can see, it never downloads or runs
+code at runtime.
+
+**Check it yourself**
+
+Paste this into Claude (or another assistant that can read a public
+repository) and read the verdict before you build the app:
+
+```
+I am considering running Claude Meter, an open-source menu bar app that reads my Claude Code sign-in from my keychain (macOS) or from ~/.claude/.credentials.json (Windows) to show my plan usage. Audit it for anything malicious or unsafe before I run it.
+
+Repository: https://github.com/bernmc/claude-meter
+The whole app is two source files, macos/main.swift and windows/Program.cs, plus macos/build.sh, windows/build.ps1, windows/ClaudeMeter.csproj and .github/workflows/release.yml. Read all of them in full.
+
+Report, with file and line references:
+1. Every network destination the code can contact and what is sent to each. Flag anything other than api.anthropic.com, platform.claude.com, api.github.com, or opening a github.com or code.claude.com page in the browser.
+2. Everything it does with my credentials: where it reads them, what it stores, where it writes, and whether a token could leave the machine anywhere except Anthropic's own endpoints.
+3. Every file it writes or executes, including any scripts it generates and runs.
+4. Anything obfuscated, encoded, fetched at runtime, or that changes behaviour based on time, locale or environment.
+5. Whether the build scripts and the GitHub Actions workflow do anything beyond compiling and publishing the executables.
+Finish with a plain verdict: safe to run as published, or not, and why.
+```
+
+If the verdict mentions anything not covered above, open an issue; that
+is either a bug in this README or in the app, and both get fixed.
+
+## How it works
+
+- It reads Claude Code's OAuth credentials from where Claude Code keeps them:
   the **login keychain** on macOS (service `Claude Code-credentials`, via
   `/usr/bin/security`), the file `%USERPROFILE%\.claude\.credentials.json` on
-  Windows. Nothing is sent anywhere except to Anthropic's own endpoints.
-- Every 60 s it calls `GET https://api.anthropic.com/api/oauth/usage` — the
-  endpoint the Claude app's usage screen uses — with your token.
+  Windows.
+- Every 60 s it calls `GET https://api.anthropic.com/api/oauth/usage` (the
+  endpoint the Claude app's usage screen uses) with your token.
 - When the access token expires it refreshes it via
   `POST https://platform.claude.com/v1/oauth/token` (Claude Code's public
   OAuth client id) and **writes the rotated tokens back** so Claude Code stays
   signed in. This mirrors what Claude Code does itself.
-- Usage history for the sparkline is stored locally (7-day retention) in
+- Usage history for the sparkline is stored locally with 7-day retention, in
   `~/Library/Application Support/Claude Meter/` (macOS) or
-  `%APPDATA%\Claude Meter\` (Windows, alongside `settings.json`).
-
-No analytics, no third-party services, no network calls other than the two
-Anthropic endpoints above and the update check described under
-[Updates](#updates) (a public, unauthenticated request to
-`api.github.com`).
+  `%APPDATA%\Claude Meter\` (Windows).
 
 > **Note:** sign in to Claude Code separately on each machine you run
-> Claude Meter on. Don't copy the credentials file between machines — refresh
+> Claude Meter on. Don't copy the credentials file between machines. Refresh
 > tokens rotate on use, and two copies of the same token family will sign
 > each other out.
 
 If Claude Code gets signed out, the meter shows a red "!" and a "Sign in to
-Claude Code…" button. On macOS it opens Terminal running `claude auth login`; on
-Windows the same button (tray menu or flyout) runs `claude auth login` in a console
-and offers the `winget install Anthropic.ClaudeCode` command if Claude Code isn't
-installed.
+Claude Code…" button (see [Sign-in expired?](#sign-in-expired)).
 
 ## Updates
 
@@ -185,8 +255,8 @@ falls back to `%APPDATA%\Claude Meter\status\current-<hostname>.json`:
 }
 ```
 
-Controlled by two keys — `statusExportPath` (string, overrides the full path)
-and `statusExportEnabled` (bool, default true) — set with `defaults` on macOS
+Controlled by two keys, `statusExportPath` (string, overrides the full path)
+and `statusExportEnabled` (bool, default true), set with `defaults` on macOS
 or in `%APPDATA%\Claude Meter\settings.json` on Windows, or with the "Status
 file" toggle in the gear/tray menu. `--status` does a one-shot fetch, writes
 the file, and prints the same JSON to stdout.
@@ -199,14 +269,17 @@ time, which would break the app without notice. Use at your own risk.
 
 ## Uninstall
 
-**macOS** — quit the app, then:
+**macOS**: quit the app, then:
 
 ```sh
 rm -rf ~/Applications/"Claude Meter.app" ~/Library/Application\ Support/"Claude Meter"
 defaults delete au.bernard.claude-meter
 ```
 
-**Windows** — quit the app (tray icon → Quit), then:
+The two generated scripts (`sign-in.command` and `update.command`) live in the
+Application Support folder, so the `rm -rf` above removes them too.
+
+**Windows**: quit the app (tray icon → Quit), then:
 
 ```powershell
 Remove-Item -Recurse -Force "$env:LOCALAPPDATA\Programs\Claude Meter", "$env:APPDATA\Claude Meter"

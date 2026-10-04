@@ -404,7 +404,7 @@ static class UsageAPI
 
     public static async Task<(string token, string? plan)> ValidToken(bool forceRefresh = false)
     {
-        var noCreds = $"No Claude Code credentials at {Creds.CredsPath} — install Claude Code on this machine and sign in once (run `claude`).";
+        var noCreds = $"No Claude Code credentials at {Creds.CredsPath} — install Claude Code on this machine and sign in once (run `claude auth login`).";
         var creds = Creds.Read() ?? throw (Creds.IsAbsent()
             ? new AuthRequiredException(noCreds)
             : new ApiException(noCreds));
