@@ -15,6 +15,7 @@ Briefs for both machines live in `plans/`.
 ## Agreed (reviewed, committed, not yet pushed)
 
 ## Done (pushed)
+- v1.3.1 272988e: Windows code unchanged except version 1.3.1; expect the 1.3 → 1.3.1 update balloon
 - opacity-win 60df0d1 (v1.3 tagged); rings-polish-mac + float-width-mac done on Mac 60df0d1
 - status-file-win: f5920f1 — current-<hostname>.json in the synced status folder (project dir required, status/ created), %APPDATA% fallback, settings keys, Status file toggle, --status. JSON matches the Mac in keys/order/types/timestamps; only whitespace style differs.
 - rings-tweaks-win: cee9e18 — #3A3A3A number outline; float right-click opens the tray menu (all styles).
