@@ -625,12 +625,62 @@ enum UpdateLauncher {
         }
     }
 
-    // The configured checkout, only if it contains macos/build.sh.
+    // The only remotes Update may pull from. The generated script repeats the
+    // same four forms in shell.
+    static let acceptedRemotes = [
+        "https://github.com/bernmc/claude-meter",
+        "https://github.com/bernmc/claude-meter.git",
+        "git@github.com:bernmc/claude-meter",
+        "git@github.com:bernmc/claude-meter.git",
+    ]
+
+    static func isAcceptedRemote(_ url: String) -> Bool {
+        acceptedRemotes.contains(url.trimmingCharacters(in: .whitespacesAndNewlines))
+    }
+
+    // `git -C <path> remote get-url origin`, 5 s timeout. nil on any failure.
+    static func originURL(of path: String) -> String? {
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/usr/bin/git")
+        p.arguments = ["-C", path, "remote", "get-url", "origin"]
+        let out = Pipe()
+        p.standardOutput = out
+        p.standardError = FileHandle.nullDevice
+        let done = DispatchSemaphore(value: 0)
+        p.terminationHandler = { _ in done.signal() }
+        do { try p.run() } catch { return nil }
+        if done.wait(timeout: .now() + 5) == .timedOut {
+            p.terminate()
+            return nil
+        }
+        guard p.terminationStatus == 0 else { return nil }
+        let data = out.fileHandleForReading.readDataToEndOfFile()
+        return String(data: data, encoding: .utf8)
+    }
+
+    private static let remoteLock = NSLock()
+    private static var remoteCache: [String: Bool] = [:]
+
+    // Cached per launch, per path.
+    static func originIsAccepted(at path: String) -> Bool {
+        remoteLock.lock()
+        if let hit = remoteCache[path] { remoteLock.unlock(); return hit }
+        remoteLock.unlock()
+        let ok = originURL(of: path).map(isAcceptedRemote) ?? false
+        remoteLock.lock()
+        remoteCache[path] = ok
+        remoteLock.unlock()
+        return ok
+    }
+
+    // The configured checkout, only if it contains macos/build.sh and its
+    // origin is this project's GitHub repository.
     static func repoPath() -> String? {
         guard let raw = UserDefaults.standard.string(forKey: "updateRepoPath"), !raw.isEmpty else { return nil }
         let path = (raw as NSString).expandingTildeInPath
         let build = (path as NSString).appendingPathComponent("macos/build.sh")
-        return FileManager.default.fileExists(atPath: build) ? path : nil
+        guard FileManager.default.fileExists(atPath: build) else { return nil }
+        return originIsAccepted(at: path) ? path : nil
     }
 
     static func scriptBody(for path: String) -> String {
@@ -642,8 +692,14 @@ enum UpdateLauncher {
         return """
         #!/bin/zsh -l
         cd "\(q)" || exit 1
-        echo "Updating Claude Meter from GitHub…"
-        git pull --ff-only
+        expected='https://github.com/bernmc/claude-meter'
+        remote="$(git remote get-url origin 2>/dev/null)"
+        case "$remote" in
+          "$expected"|"$expected.git"|"git@github.com:bernmc/claude-meter"|"git@github.com:bernmc/claude-meter.git") ;;
+          *) echo "Refusing to update: this checkout's origin is '$remote', not $expected."; echo "Open https://github.com/bernmc/claude-meter/releases instead."; exit 2 ;;
+        esac
+        echo "Updating Claude Meter from $expected…"
+        git pull --ff-only origin main || { echo "git pull failed; nothing was built."; exit 3; }
         cd macos && ./build.sh --install
         echo
         echo "Done. You can close this window."
@@ -2260,6 +2316,22 @@ if let i = CommandLine.arguments.firstIndex(of: "--preview-update") {
         do { try png.write(to: URL(fileURLWithPath: out)) } catch { print("write failed: \(error)"); exit(1) }
         exit(0)
     }
+}
+
+// `--selftest-update-script`: print the generated update script to stdout
+// (placeholder checkout path), write and open nothing, exit 0.
+if CommandLine.arguments.contains("--selftest-update-script") {
+    print(UpdateLauncher.scriptBody(for: "/path/to/claude-meter"), terminator: "")
+    exit(0)
+}
+
+// `--selftest-remote-check <url>`: print accept/reject for an origin URL using
+// the same matcher the app uses before offering Update. Exit 0.
+if let i = CommandLine.arguments.firstIndex(of: "--selftest-remote-check") {
+    let args = CommandLine.arguments
+    guard i + 1 < args.count else { print("usage: --selftest-remote-check <url>"); exit(2) }
+    print(UpdateLauncher.isAcceptedRemote(args[i + 1]) ? "accept" : "reject")
+    exit(0)
 }
 
 // `--check-update`: one GitHub Releases lookup, no UI, no state written.

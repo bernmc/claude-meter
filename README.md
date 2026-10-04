@@ -121,7 +121,7 @@ can read them in a minute.
 | `api.anthropic.com` (usage endpoint) | every 60 s (on macOS, every 5 s for up to 3 minutes after you click Sign in) | your Claude Code access token, as a bearer header |
 | `platform.claude.com` (token endpoint) | only when the access token has expired | your refresh token, to get a new pair |
 | `api.github.com` (releases/latest) | 10 s after launch, then daily, or on demand; can be turned off | nothing but the app's version in the user-agent |
-| `github.com` | only when you click Update or Open release page | opens the page in your browser; on macOS with a checkout, Update runs `git pull` in Terminal. The app sends no data itself |
+| `github.com` | only when you click Update or Open release page | opens the page in your browser; on macOS with a checkout, Update runs `git pull` from that checkout, and refuses unless the checkout's origin is this repository. The app sends no data itself |
 | `code.claude.com` | only on Windows, when Claude Code is not installed and you click Open install page | opens the page in your browser; nothing sent by the app |
 
 There are no other hosts, no analytics, no crash reporting and no
@@ -137,7 +137,8 @@ telemetry. Your tokens are sent to Anthropic's endpoints only.
 - Its own usage history in `~/Library/Application Support/Claude Meter/` (macOS), or
   settings and usage history in `%APPDATA%\Claude Meter\` (Windows). On macOS the
   settings are stored with `defaults`, in the domain `au.bernard.claude-meter`.
-- The optional status file described below.
+- The optional status file described below. It never contains tokens. If the
+  folder it lives in is synced by another tool, the usage numbers travel with it.
 - On macOS, two small shell scripts it generates and opens in Terminal
   when you click Sign in or Update: one runs `claude auth login`, the
   other runs `git pull` and the build script in your checkout. You see
@@ -154,7 +155,15 @@ It never reads any other keychain item or file, never installs anything
 persistent beyond the optional launch-at-login entry, and never contacts a
 host that is not in the table. Apart from the sign-in and update steps
 listed above, which run in a window you can see, it never downloads or runs
-code at runtime.
+code at runtime. The update script checks that the checkout's origin is this
+repository before it pulls, and builds only after a successful fast-forward.
+
+**Environment variables (Windows, for tests)**
+
+`CLAUDE_METER_CREDS_PATH` overrides where the credential file is read and
+written. `CLAUDE_METER_CLAUDE_EXE` overrides which `claude` executable Sign in
+launches. Both exist for automated tests; anyone who can set your environment
+can already do worse.
 
 **Check it yourself**
 
@@ -178,6 +187,9 @@ Finish with a plain verdict: safe to run as published, or not, and why.
 
 If the verdict mentions anything not covered above, open an issue; that
 is either a bug in this README or in the app, and both get fixed.
+
+First external audit: 04/10/2026, which found the unverified update remote;
+fixed in 1.3.1.
 
 ## How it works
 
@@ -217,10 +229,13 @@ When a newer release exists you get one notification per version, and the
 popover shows "Update available: vX.Y" with a button:
 
 - **macOS**: **Update…** opens Terminal on `update.command` (written to
-  `~/Library/Application Support/Claude Meter/`), which runs `git pull --ff-only`
-  in your checkout and then `macos/build.sh --install`. This needs a checkout;
-  without one the button reads **Open release page…** and opens the release in
-  your browser. The right-click menu also gets **Update to vX.Y…**.
+  `~/Library/Application Support/Claude Meter/`), which runs
+  `git pull --ff-only origin main` in your checkout and then
+  `macos/build.sh --install`. The script first checks that the checkout's
+  `origin` is `https://github.com/bernmc/claude-meter` (or the `.git` or
+  `git@github.com:` forms) and stops without pulling or building otherwise. This
+  needs a checkout with that origin; without one the button reads **Open release
+  page…** and opens the release in your browser. The right-click menu also gets **Update to vX.Y…**.
 - **Windows**: the button opens the release page in your browser.
 
 `defaults` keys (macOS, domain `au.bernard.claude-meter`):
@@ -238,7 +253,9 @@ exits 0 (exit 2 on a network error).
 macOS and Windows. On every refresh attempt Claude Meter atomically writes
 the current snapshot to `~/SynologyDrive/AI_Context/01-Projects/
 Claude_Toolkit/Claude_Meter/status/`, so other local tools can read live
-usage without touching the credentials or Anthropic's endpoint. macOS writes
+usage without touching the credentials or Anthropic's endpoint. The file never
+contains tokens; if the folder it lives in is synced by another tool, the usage
+numbers travel with it. macOS writes
 `current.json`. Windows writes `current-<hostname>.json` (hostname
 lower-cased, e.g. `current-win-cnc.json`) so each machine has its own file
 and the sync never sees two writers (the `status` folder is created if
