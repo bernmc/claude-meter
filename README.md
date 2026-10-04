@@ -20,14 +20,19 @@ plan usage** at a glance — the same numbers as the Claude app's
 - **Floating desktop gauge**: a small always-on-top panel with three mini gauges and
   the reset countdown. Drag it anywhere; position is remembered. Three layouts:
   one-line, square, or Apple-Watch-style concentric rings (week outside, model,
-  session inside) with the percentages stacked in the centre. Pick the layout from
-  the gear menu or the right-click menu; "Rings centre" chooses whether the week or
-  the session number is largest.
+  session inside) with the percentages stacked in the centre, sized to fit the
+  inner hole, and each ring labelled along its band (total, the model name,
+  session). Pick the layout from the gear menu or the right-click menu; "Rings
+  centre" chooses whether the week or the session number is largest. Right-click
+  anywhere on the gauge opens the same menu as the menu bar icon.
 - **Usage warnings**: a notification when any limit crosses a threshold
   (80/90/95%, or off). Warns once per approach, re-arms after the reset.
 - **Configurable** from the gear menu: desktop gauge on/off and layout, which
   limit the icon tracks (worst limit, session, week, or model week), percent display on/off, warning threshold, update check, launch
   at login. Choose which limits are drawn as gauges (Gauges in the gear menu).
+  On macOS the desktop gauge's background opacity runs from clear glass to solid:
+  a slider in the right-click menu, five steps (Clear, 25 %, 50 %, 75 %, Solid)
+  in the gear menu.
 
 Works with any Claude subscription (Pro, Max, …) — it displays whatever
 limits your plan reports. Dates and times follow your system locale.
@@ -38,7 +43,8 @@ Both platforms need [Claude Code](https://claude.com/claude-code) installed
 and signed in at least once **on the same machine** (that's where the
 credentials come from).
 
-- **macOS**: macOS 14 or later; Xcode Command Line Tools to build
+- **macOS**: macOS 14 or later (the desktop gauge uses Liquid Glass on macOS 26+
+  and the frosted material on 14-15); Xcode Command Line Tools to build
   (`xcode-select --install`).
 - **Windows**: Windows 10 or later. To build you need the
   [.NET 8 SDK](https://dotnet.microsoft.com/download/dotnet/8.0)

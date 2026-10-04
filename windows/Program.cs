@@ -151,6 +151,12 @@ static class S
     }
     // "week" | "session": which number is largest (top) in the Rings centre.
     public static string RingsCentre  { get => Get("ringsCentre", "week"); set => Set("ringsCentre", value); }
+    // Floating gauge opacity, 0.2..1.0 (default 0.94). Applied to all three styles.
+    public static double GaugeOpacity
+    {
+        get { double v = Get("gaugeOpacity", 0.94); return double.IsNaN(v) ? 0.94 : Math.Clamp(v, 0.2, 1.0); }
+        set => Set("gaugeOpacity", double.IsNaN(value) ? 0.94 : Math.Clamp(value, 0.2, 1.0));
+    }
     public static string TrayMetric   { get => Get("trayMetric", "worst"); set => Set("trayMetric", value); }
     public static bool TrayShowPct    { get => Get("trayShowPct", true);   set => Set("trayShowPct", value); }
     // Which limits are drawn as gauges (popover rings, all float styles). Absent = on.
@@ -1267,7 +1273,7 @@ class FloatForm : Form
         StartPosition = FormStartPosition.Manual;
         TopMost = true;
         DoubleBuffered = true;
-        // Opacity 0.94 is applied in ApplyLayering (the Rings disc is a per-pixel-alpha layered window).
+        // S.GaugeOpacity is applied in ApplyLayering / ApplyOpacity (line, square) and PushLayered (Rings disc).
         // Dragging starts from OnMouseDown (WM_NCLBUTTONDOWN) so the client area
         // stays HTCLIENT and the tooltip sees mouse moves; no caption means a
         // double-click can't maximize, but keep these off anyway.
@@ -1292,12 +1298,12 @@ class FloatForm : Form
         }
     }
 
-    // Layering: 1 = Rings disc (UpdateLayeredWindow, per-pixel alpha), 2 = other styles (whole-window alpha 0.94).
+    // Layering: 1 = Rings disc (UpdateLayeredWindow, per-pixel alpha), 2 = other styles (whole-window alpha = S.GaugeOpacity).
     // The layered bit is cleared and set again on every switch, so UpdateLayeredWindow stays legal after
     // SetLayeredWindowAttributes and vice versa.
     int layerMode;
     bool ringsMode;
-    const byte WindowAlpha = 240;   // 0.94
+    static byte Alpha => (byte)Math.Round(255 * S.GaugeOpacity);
 
     protected override void OnHandleCreated(EventArgs e)
     {
@@ -1319,16 +1325,23 @@ class FloatForm : Form
         int ex = Win32.GetWindowLong(Handle, Win32.GWL_EXSTYLE);
         Win32.SetWindowLong(Handle, Win32.GWL_EXSTYLE, ex & ~Win32.WS_EX_LAYERED);
         Win32.SetWindowLong(Handle, Win32.GWL_EXSTYLE, ex | Win32.WS_EX_LAYERED);
-        if (!rings) Win32.SetLayeredWindowAttributes(Handle, 0, WindowAlpha, Win32.LWA_ALPHA);
+        if (!rings) Win32.SetLayeredWindowAttributes(Handle, 0, Alpha, Win32.LWA_ALPHA);
         Win32.DwmFrame(this, rings);
         layerMode = want;
+    }
+
+    // Whole-window alpha for the line/square styles (the Rings disc takes it in PushLayered).
+    void ApplyOpacity()
+    {
+        if (IsHandleCreated && layerMode == 2)
+            Win32.SetLayeredWindowAttributes(Handle, 0, Alpha, Win32.LWA_ALPHA);
     }
 
     // Repaint whatever the current style needs.
     public void Redraw()
     {
         if (ringsMode) PushLayered();
-        else Invalidate();
+        else { ApplyOpacity(); Invalidate(); }
     }
 
     // Render the Rings disc into a 32-bpp premultiplied-ARGB DIB and hand it to the window manager.
@@ -1357,7 +1370,7 @@ class FloatForm : Form
             var size = new Win32.SIZE { cx = w, cy = h };
             var src = new Win32.POINT();
             var blend = new Win32.BLENDFUNCTION
-            { BlendOp = 0 /* AC_SRC_OVER */, SourceConstantAlpha = WindowAlpha, AlphaFormat = 1 /* AC_SRC_ALPHA */ };
+            { BlendOp = 0 /* AC_SRC_OVER */, SourceConstantAlpha = Alpha, AlphaFormat = 1 /* AC_SRC_ALPHA */ };
             Win32.UpdateLayeredWindow(Handle, screenDc, IntPtr.Zero, ref size, memDc, ref src, 0, ref blend,
                                       Win32.ULW_ALPHA);
         }
@@ -2218,6 +2231,19 @@ class App : ApplicationContext
         var cSession = new ToolStripMenuItem("Session largest", null, (_, _) => S.RingsCentre = "session");
         centre.DropDownItems.AddRange(new ToolStripItem[] { cWeek, cSession });
 
+        var opacity = new ToolStripMenuItem("Gauge opacity");
+        var opacityTrack = new TrackBar
+        {
+            Minimum = 20, Maximum = 100, TickFrequency = 20, SmallChange = 5, LargeChange = 20,
+            Value = 94, AutoSize = false, Width = 160, Height = 32,
+        };
+        bool opacitySyncing = false;
+        opacityTrack.ValueChanged += (_, _) =>
+        {
+            if (!opacitySyncing) S.GaugeOpacity = opacityTrack.Value / 100.0;
+        };
+        opacity.DropDownItems.Add(new ToolStripControlHost(opacityTrack) { AutoSize = false, Size = new Size(160, 32) });
+
         var metric = new ToolStripMenuItem("Tray icon shows");
         var mWorst = new ToolStripMenuItem("Worst limit", null, (_, _) => S.TrayMetric = "worst");
         var mSession = new ToolStripMenuItem("Session (5 h)", null, (_, _) => S.TrayMetric = "session");
@@ -2251,7 +2277,7 @@ class App : ApplicationContext
 
         menu.Items.AddRange(new ToolStripItem[]
         {
-            floatItem, gauges, style, centre, new ToolStripSeparator(),
+            floatItem, gauges, style, centre, opacity, new ToolStripSeparator(),
             metric, pctItem, warn, new ToolStripSeparator(),
             statusItem, autoUpd, checkNow, login, new ToolStripSeparator(),
             updateItem,
@@ -2277,6 +2303,9 @@ class App : ApplicationContext
             rings.Checked = fs == "rings";
             cWeek.Checked = S.RingsCentre != "session";
             cSession.Checked = S.RingsCentre == "session";
+            opacitySyncing = true;
+            opacityTrack.Value = Math.Clamp((int)Math.Round(S.GaugeOpacity * 100), 20, 100);
+            opacitySyncing = false;
             mWorst.Checked = S.TrayMetric == "worst";
             mSession.Checked = S.TrayMetric == "session";
             mWeek.Checked = S.TrayMetric == "week";

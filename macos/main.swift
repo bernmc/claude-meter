@@ -113,6 +113,18 @@ enum FloatStyle {
     }
 }
 
+// Floating-gauge background opacity, 0 (clear glass) ... 1 (solid). Stored under
+// `gaugeOpacity`; absent = 0.6. FloatingView reads it through @AppStorage, the
+// right-click slider and the previews through this helper.
+enum GaugeOpacity {
+    static let key = "gaugeOpacity"
+    static let fallback = 0.6
+    static func clamp(_ v: Double) -> Double { min(1, max(0, v)) }
+    static var current: Double {
+        clamp(UserDefaults.standard.object(forKey: key) as? Double ?? fallback)
+    }
+}
+
 enum Sev {
     // Traffic-light thresholds; API "severity" only says normal/warning so we
     // derive finer bands from the percentage.
@@ -989,6 +1001,7 @@ struct PopoverView: View {
     @AppStorage("showSession") private var showSession = true
     @AppStorage("showWeek") private var showWeek = true
     @AppStorage("showModel") private var showModel = true
+    @AppStorage("gaugeOpacity") private var gaugeOpacity = GaugeOpacity.fallback
     var forceSel: GaugeSelection? = nil   // previews: don't touch user defaults
     private var sel: GaugeSelection {
         forceSel ?? GaugeSelection(session: showSession, week: showWeek, model: showModel)
@@ -1146,6 +1159,13 @@ struct PopoverView: View {
                         Text("Week largest").tag("week")
                         Text("Session largest").tag("session")
                     }
+                    Picker("Gauge opacity", selection: $gaugeOpacity) {
+                        Text("Clear").tag(0.0)
+                        Text("25 %").tag(0.25)
+                        Text("50 %").tag(0.5)
+                        Text("75 %").tag(0.75)
+                        Text("Solid").tag(1.0)
+                    }
                     Divider()
                     Picker("Menu bar shows", selection: $menuBarMetric) {
                         Text("Worst limit").tag("worst")
@@ -1187,6 +1207,36 @@ struct PopoverView: View {
     }
 }
 
+// Background of the floating gauge. macOS 26+: Liquid Glass tinted with the
+// window colour at `opacity` (0 = clear glass, 1 = near-solid). Older macOS:
+// the frosted material with a window-colour fill over it. `.background(_, in:)`
+// (not a background view) keeps the vibrancy-aware secondary text of the cards.
+struct GaugeBackground<S: InsettableShape>: ViewModifier {
+    let shape: S
+    let opacity: Double
+    var frosted = false   // previews: force the pre-26 path (glass can't be drawn off-screen)
+
+    @ViewBuilder
+    func body(content: Content) -> some View {
+        let tint = Color(nsColor: .windowBackgroundColor).opacity(opacity)
+        if #available(macOS 26.0, *), !frosted {
+            // Glass tint alone never gets opaque (and darkens the colour), so a
+            // window-colour fill under the glass takes over towards 1 (squared:
+            // little at low values) while the tint fades out.
+            let solid = opacity * opacity
+            content
+                .glassEffect(.regular.tint(tint.opacity(1 - solid)), in: shape)
+                .background(shape.fill(Color(nsColor: .windowBackgroundColor).opacity(solid)))
+                .overlay(shape.strokeBorder(Color.primary.opacity(0.12)))
+        } else {
+            content
+                .background(shape.fill(tint))
+                .background(.regularMaterial, in: shape)
+                .overlay(shape.strokeBorder(Color.primary.opacity(0.12)))
+        }
+    }
+}
+
 struct FloatingView: View {
     @ObservedObject var model: UsageModel
     @AppStorage("floatStyle") private var storedStyle = FloatStyle.current
@@ -1194,10 +1244,14 @@ struct FloatingView: View {
     @AppStorage("showSession") private var showSession = true
     @AppStorage("showWeek") private var showWeek = true
     @AppStorage("showModel") private var showModel = true
+    @AppStorage("gaugeOpacity") private var storedOpacity = GaugeOpacity.fallback
     var forceSel: GaugeSelection? = nil
     private var sel: GaugeSelection {
         forceSel ?? GaugeSelection(session: showSession, week: showWeek, model: showModel)
     }
+    var forceOpacity: Double? = nil
+    var forceFrosted = false
+    private var opacity: Double { GaugeOpacity.clamp(forceOpacity ?? storedOpacity) }
     var forceStyle: String? = nil   // previews: don't depend on (or touch) user defaults
     var forceCentre: String? = nil
     private var centre: String { forceCentre ?? storedCentre }
@@ -1224,19 +1278,13 @@ struct FloatingView: View {
         }
     }
 
-    // `.background(_, in:)` (not a background view) keeps the vibrancy-aware
-    // secondary/tertiary text of the original cards.
     @ViewBuilder
     var body: some View {
         if disc {
-            content
-                .background(.regularMaterial, in: Circle())
-                .overlay(Circle().strokeBorder(Color.primary.opacity(0.12)))
+            content.modifier(GaugeBackground(shape: Circle(), opacity: opacity, frosted: forceFrosted))
         } else {
-            content
-                .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
-                .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous)
-                    .strokeBorder(Color.primary.opacity(0.12)))
+            content.modifier(GaugeBackground(shape: RoundedRectangle(cornerRadius: 14, style: .continuous),
+                                             opacity: opacity, frosted: forceFrosted))
         }
     }
 
@@ -1255,18 +1303,29 @@ struct FloatingView: View {
         let kinds = sel.rings(snap)
         let diameters: [CGFloat] = [108, 84, 60]
         func pct(_ k: GaugeKind) -> Double { snap.entry(k)?.percent ?? 0 }
+        // "week" (default): outermost on top, innermost at the bottom;
+        // "session" reverses it. Lines are cap-height tight; sizes follow
+        // position and are scaled together so the stack fits the hole.
+        let ordered = centre == "session" ? Array(kinds.reversed()) : kinds
+        let fonts: [CGFloat] = kinds.count >= 3 ? [19, 15, 12] : (kinds.count == 2 ? [19, 13] : [22])
+        let scale = Self.centreScale(texts: ordered.map { "\(Int(pct($0).rounded()))" },
+                                     fonts: fonts, hole: diameters[kinds.count - 1] - 18)
+        let labels: [(String, CGFloat)] = kinds.enumerated().map { i, k in
+            (bandLabel(k, snap), (diameters[i] - 9) / 2)
+        }
         return ZStack {
             ForEach(Array(kinds.enumerated()), id: \.element) { i, k in
                 ringArc(pct(k), diameter: diameters[i])
             }
-            // "week" (default): outermost on top, innermost at the bottom;
-            // "session" reverses it. Lines are cap-height tight so the stack
-            // fits the hole inside the innermost ring. Sizes follow position.
-            let ordered = centre == "session" ? Array(kinds.reversed()) : kinds
-            let fonts: [CGFloat] = kinds.count >= 3 ? [19, 15, 12] : (kinds.count == 2 ? [19, 13] : [22])
-            VStack(spacing: 1) {
+            Canvas { ctx, size in
+                let c = CGPoint(x: size.width / 2, y: size.height / 2)
+                for (text, r) in labels { Self.drawCurved(text, radius: r, centre: c, ctx: ctx) }
+            }
+            .frame(width: 108, height: 108)
+            .allowsHitTesting(false)
+            VStack(spacing: scale) {
                 ForEach(Array(ordered.enumerated()), id: \.element) { i, k in
-                    ringNumber(pct(k), fonts[i])
+                    ringNumber(pct(k), fonts[i] * scale)
                 }
             }
         }
@@ -1295,24 +1354,93 @@ struct FloatingView: View {
         .frame(width: d, height: d)
     }
 
+    // Largest scale (<= 1) at which the whole number stack fits the hole:
+    // inside a square of 0.8 x hole on both axes, and with every row's outer
+    // corner within 0.45 x hole of the centre (a square alone lets the top and
+    // bottom rows touch a round hole). Row height is 0.70 x font size, 1 pt
+    // spacing; hole is the clear diameter inside the innermost stroke.
+    static func centreScale(texts: [String], fonts: [CGFloat], hole: CGFloat) -> CGFloat {
+        let n = min(texts.count, fonts.count)
+        let widths = (0..<n).map { OutlinedNumber.textWidth(texts[$0], size: fonts[$0]) }
+        let heights = (0..<n).map { fonts[$0] * 0.70 }
+        let total = heights.reduce(0, +) + CGFloat(max(n - 1, 0))
+        var top = -total / 2, corner: CGFloat = 0
+        for i in 0..<n {
+            let bottom = top + heights[i]
+            corner = max(corner, hypot(widths[i] / 2, max(abs(top), abs(bottom))))
+            top = bottom + 1
+        }
+        let box = 0.8 * hole
+        return min(1, box / max(widths.max() ?? 1, 1), box / max(total, 1), 0.45 * hole / max(corner, 1))
+    }
+
+    private func bandLabel(_ k: GaugeKind, _ snap: UsageSnapshot) -> String {
+        switch k {
+        case .week:    return "total"
+        case .session: return "session"
+        case .model:
+            guard let m = snap.primaryModel else { return "model" }
+            let n = snap.modelName(m).lowercased()
+            return n.isEmpty ? "model" : n
+        }
+    }
+
+    // Draws `text` glyph by glyph along the circle of `radius` around `centre`,
+    // starting at 12 o'clock and running clockwise; each glyph is rotated to the
+    // tangent with its cap-height centred on the circle. Thin weight, cap height
+    // 60 % of the 9 pt band; shrunk if the label would pass a quarter turn.
+    static func drawCurved(_ text: String, radius r: CGFloat, centre c: CGPoint, ctx: GraphicsContext) {
+        func font(_ s: CGFloat) -> NSFont { .systemFont(ofSize: s, weight: .light) }
+        func advances(_ s: CGFloat) -> [CGFloat] {
+            text.map { NSAttributedString(string: String($0), attributes: [.font: font(s)]).size().width }
+        }
+        var size = 9 * 0.6 / (font(100).capHeight / 100)
+        var adv = advances(size)
+        let total = adv.reduce(0, +), quarter = (CGFloat.pi / 2) * r
+        if total > quarter { size *= quarter / total; adv = advances(size) }
+        let f = font(size)
+        // SwiftUI centres the line box; move the glyph so the cap-height centre sits on the circle.
+        let lift = (f.ascender + f.descender) / 2 - f.capHeight / 2
+        var s: CGFloat = 0
+        for (ch, a) in zip(text, adv) {
+            let theta = (s + a / 2) / r
+            s += a
+            var g = ctx
+            g.translateBy(x: c.x + r * sin(theta), y: c.y - r * cos(theta))
+            g.rotate(by: .radians(theta))
+            let t = Text(String(ch)).font(.system(size: size, weight: .light))
+                .foregroundColor(Color.primary.opacity(0.8))
+            g.draw(t, at: CGPoint(x: 0, y: -lift), anchor: .center)
+        }
+    }
+
     private func ringNumber(_ pct: Double, _ size: CGFloat) -> some View {
         OutlinedNumber(text: "\(Int(pct.rounded()))", size: size, color: Sev.nsColor(pct))
             .frame(height: size * 0.70)
     }
 
-    // One line: rings on the left, title + countdown on the right.
+    // One line: rings on the left, a centred text column on the right: title,
+    // "resets in …", clock (the reset text split at its " · "; without one it
+    // stays a single line). The column is as wide as its widest line.
     private func wideLayout(_ snap: UsageSnapshot) -> some View {
-        HStack(spacing: 14) {
+        let reset = resetText(snap.session?.resetsAt)
+        let parts: [String]
+        if let r = reset.range(of: " · ") {
+            parts = [String(reset[..<r.lowerBound]), String(reset[r.upperBound...])]
+        } else {
+            parts = [reset]
+        }
+        return HStack(spacing: 14) {
             miniRings(snap)
-            VStack(alignment: .leading, spacing: 2) {
+            VStack(alignment: .center, spacing: 2) {
                 Text("Claude").font(.system(size: 10, weight: .bold))
                     .foregroundStyle(.secondary)
-                Text(resetText(snap.session?.resetsAt))
-                    .font(.system(size: 9)).foregroundStyle(.secondary)
-                    .lineLimit(2)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .frame(width: 140, alignment: .leading)
+                ForEach(Array(parts.enumerated()), id: \.offset) { _, line in
+                    Text(line).font(.system(size: 9)).foregroundStyle(.secondary)
+                }
             }
+            .lineLimit(1)
+            .fixedSize()
         }
     }
 
@@ -1365,10 +1493,10 @@ struct FloatingView: View {
     }
 }
 
-// Centre number of the rings disc: filled in the ring colour with a fine black
+// Centre number of the rings disc: filled in the ring colour with a fine dark-grey
 // outline. SwiftUI Text can't stroke glyphs, so this wraps NSTextFields with
 // attributed strings: a stroke-only layer (strokeWidth +6 = 6 % of the point
-// size, black) under a fill-only layer in the ring colour. A single fill+stroke
+// size, dark grey) under a fill-only layer in the ring colour. A single fill+stroke
 // string (negative strokeWidth) centres the stroke on the glyph edge and eats
 // into the digit; stacking the layers leaves the full bold fill with the
 // outline hugging it from outside.
@@ -1377,18 +1505,29 @@ struct OutlinedNumber: NSViewRepresentable {
     let size: CGFloat
     let color: NSColor
 
-    private func attributed(stroke: Bool) -> NSAttributedString {
+    // Dark-grey outline (#3A3A3A) in both appearances.
+    static let outlineColor = NSColor(red: 0.227, green: 0.227, blue: 0.227, alpha: 1)
+
+    static func font(size: CGFloat) -> NSFont {
         var desc = NSFont.systemFont(ofSize: size, weight: .bold).fontDescriptor
         if let rounded = desc.withDesign(.rounded) { desc = rounded }
         desc = desc.addingAttributes([.featureSettings: [[
             NSFontDescriptor.FeatureKey.typeIdentifier: kNumberSpacingType,
             NSFontDescriptor.FeatureKey.selectorIdentifier: kMonospacedNumbersSelector]]])
-        let font = NSFont(descriptor: desc, size: size) ?? .systemFont(ofSize: size, weight: .bold)
+        return NSFont(descriptor: desc, size: size) ?? .systemFont(ofSize: size, weight: .bold)
+    }
+
+    static func textWidth(_ text: String, size: CGFloat) -> CGFloat {
+        NSAttributedString(string: text, attributes: [.font: font(size: size)]).size().width
+    }
+
+    private func attributed(stroke: Bool) -> NSAttributedString {
+        let font = Self.font(size: size)
         if stroke {
             return NSAttributedString(string: text, attributes: [
                 .font: font,
-                .foregroundColor: NSColor.black,
-                .strokeColor: NSColor.black,
+                .foregroundColor: Self.outlineColor,
+                .strokeColor: Self.outlineColor,
                 .strokeWidth: 6,
             ])
         }
@@ -1458,9 +1597,16 @@ final class OutlinedNumberHost: NSView {
 // controls, so a transparent overlay catches every click and drives the drag
 // explicitly — no hit-testing heuristics involved.
 final class DragOverlayView: NSView {
+    // Builds the same menu as the status item's right-click.
+    var menuProvider: (() -> NSMenu)?
     override var mouseDownCanMoveWindow: Bool { true }
     override func mouseDown(with event: NSEvent) {
         window?.performDrag(with: event)
+    }
+    func makeContextMenu() -> NSMenu? { menuProvider?() }
+    override func rightMouseDown(with event: NSEvent) {
+        guard let menu = makeContextMenu() else { return }
+        menu.popUp(positioning: nil, at: convert(event.locationInWindow, from: nil), in: self)
     }
 }
 
@@ -1512,6 +1658,16 @@ final class AppController: NSObject, NSApplicationDelegate, NSPopoverDelegate {
                     DispatchQueue.main.async { self.sizeFloatingPanel() }
                 }
             }
+        }
+
+        // The one-line panel's width follows its text, which changes with every
+        // snapshot and as the countdown ticks.
+        model.$snapshot
+            .receive(on: RunLoop.main)
+            .sink { [weak self] _ in DispatchQueue.main.async { self?.sizeFloatingPanel() } }
+            .store(in: &cancellables)
+        Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated { self?.sizeFloatingPanel() }
         }
 
         updateStatusButton()
@@ -1608,6 +1764,13 @@ final class AppController: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     }
 
     private func showContextMenu() {
+        statusItem.menu = buildContextMenu()
+        statusItem.button?.performClick(nil)
+        statusItem.menu = nil   // restore click handling
+    }
+
+    // Shared by the status item's right-click and the floating gauge's.
+    func buildContextMenu() -> NSMenu {
         let menu = NSMenu()
         if model.needsSignIn {
             menu.addItem(withTitle: "Sign in to Claude Code…", action: #selector(menuSignIn), keyEquivalent: "").target = self
@@ -1643,15 +1806,39 @@ final class AppController: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         }
         centreItem.submenu = centreMenu
         menu.addItem(centreItem)
+        menu.addItem(makeOpacityItem())
         menu.addItem(.separator())
         if let up = model.availableUpdate {
             menu.addItem(withTitle: "Update to v\(up.version)…", action: #selector(menuUpdate), keyEquivalent: "").target = self
         }
         menu.addItem(withTitle: "Check for updates…", action: #selector(menuCheckUpdates), keyEquivalent: "").target = self
         menu.addItem(withTitle: "Quit Claude Meter", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
-        statusItem.menu = menu
-        statusItem.button?.performClick(nil)
-        statusItem.menu = nil   // restore click handling
+        return menu
+    }
+
+    // "Gauge opacity": a label over a continuous 0...1 slider (160 pt), written to
+    // `gaugeOpacity` on every change so the float follows live.
+    func makeOpacityItem() -> NSMenuItem {
+        let item = NSMenuItem(title: "Gauge opacity", action: nil, keyEquivalent: "")
+        let pad: CGFloat = 14, sliderWidth: CGFloat = 160
+        let view = NSView(frame: NSRect(x: 0, y: 0, width: sliderWidth + 2 * pad, height: 44))
+        let label = NSTextField(labelWithString: "Gauge opacity")
+        label.font = .menuFont(ofSize: 0)
+        label.sizeToFit()
+        label.frame.origin = NSPoint(x: pad, y: 24)
+        let slider = NSSlider(value: GaugeOpacity.current, minValue: 0, maxValue: 1,
+                              target: self, action: #selector(menuSetOpacity(_:)))
+        slider.isContinuous = true
+        slider.frame = NSRect(x: pad, y: 4, width: sliderWidth, height: 18)
+        slider.toolTip = "Left: clear glass, right: solid"
+        view.addSubview(label)
+        view.addSubview(slider)
+        item.view = view
+        return item
+    }
+
+    @objc private func menuSetOpacity(_ sender: NSSlider) {
+        UserDefaults.standard.set(GaugeOpacity.clamp(sender.doubleValue), forKey: GaugeOpacity.key)
     }
 
     @objc private func menuSignIn() { model.startSignIn() }
@@ -1714,6 +1901,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSPopoverDelegate {
             p.contentView = hosting
             let overlay = DragOverlayView(frame: hosting.bounds)
             overlay.autoresizingMask = [.width, .height]
+            overlay.menuProvider = { [weak self] in self?.buildContextMenu() ?? NSMenu() }
             hosting.addSubview(overlay)
             p.isOpaque = false
             p.backgroundColor = .clear
@@ -1864,6 +2052,31 @@ func renderHosted<V: View>(_ view: V) -> CGImage? {
     return rep.cgImage
 }
 
+// Liquid Glass is composited by the window server, so cacheDisplay/ImageRenderer
+// draw it blank. This puts the view in a real borderless window on screen for a
+// moment and grabs that window with screencapture(1) (2x, no shadow).
+@MainActor
+func renderOnScreen<V: View>(_ view: V, to out: String) -> Bool {
+    NSApp.setActivationPolicy(.accessory)
+    let host = NSHostingView(rootView: view)
+    host.frame = NSRect(origin: .zero, size: host.fittingSize)
+    let win = NSWindow(contentRect: NSRect(origin: NSPoint(x: 240, y: 240), size: host.fittingSize),
+                       styleMask: [.borderless], backing: .buffered, defer: false)
+    win.isOpaque = true
+    win.hasShadow = false
+    win.level = .floating
+    win.contentView = host
+    win.orderFrontRegardless()
+    RunLoop.current.run(until: Date().addingTimeInterval(1.5))
+    let p = Process()
+    p.executableURL = URL(fileURLWithPath: "/usr/sbin/screencapture")
+    p.arguments = ["-x", "-o", "-l", String(win.windowNumber), out]
+    do { try p.run() } catch { return false }
+    p.waitUntilExit()
+    win.orderOut(nil)
+    return p.terminationStatus == 0
+}
+
 for (flag, kind) in [("--preview-popover", "popover"), ("--preview-popover-noscoped", "noscoped"),
                      ("--preview-float-wide", "wide"), ("--preview-float-square", "square"),
                      ("--preview-float-rings", "rings"), ("--preview-float-rings-noscoped", "rings-noscoped"),
@@ -1890,6 +2103,7 @@ for (flag, kind) in [("--preview-popover", "popover"), ("--preview-popover-nosco
             image = r.cgImage
         default:
             var fv = FloatingView(model: model)
+            fv.forceFrosted = true
             fv.forceCentre = (kind == "rings-session") ? "session" : "week"
             fv.forceStyle = kind.hasPrefix("rings") ? "rings" : (kind == "square" ? "square" : "line")
             if kind.hasPrefix("rings") {
@@ -1904,6 +2118,38 @@ for (flag, kind) in [("--preview-popover", "popover"), ("--preview-popover-nosco
               let png = NSBitmapImageRep(cgImage: cg).representation(using: .png, properties: [:])
         else { print("render failed"); exit(1) }
         do { try png.write(to: URL(fileURLWithPath: out)) } catch { print("write failed: \(error)"); exit(1) }
+        exit(0)
+    }
+}
+
+// `--preview-float-rings-opacity <out.png> <0..1>` / `--preview-float-wide-opacity
+// <out.png> <0..1>`: the float at the given gauge opacity over a busy backdrop (a
+// hard-edged diagonal two-colour gradient, preview only) so the glass shows.
+for (flag, rings) in [("--preview-float-rings-opacity", true), ("--preview-float-wide-opacity", false)] {
+    let args = CommandLine.arguments
+    guard let i = args.firstIndex(of: flag) else { continue }
+    guard i + 2 < args.count, let value = Double(args[i + 2]) else {
+        print("usage: \(flag) <out.png> <opacity 0..1>"); exit(2)
+    }
+    let out = args[i + 1]
+    MainActor.assumeIsolated {
+        _ = NSApplication.shared
+        let model = UsageModel()
+        model.snapshot = fakeSnapshot()
+        model.plan = "max"
+        var fv = FloatingView(model: model)
+        fv.forceCentre = "week"
+        fv.forceStyle = rings ? "rings" : "line"
+        fv.forceOpacity = value
+        let backdrop = LinearGradient(
+            stops: [.init(color: Color(red: 0.98, green: 0.62, blue: 0.10), location: 0),
+                    .init(color: Color(red: 0.98, green: 0.62, blue: 0.10), location: 0.46),
+                    .init(color: Color(red: 0.10, green: 0.25, blue: 0.80), location: 0.54),
+                    .init(color: Color(red: 0.10, green: 0.25, blue: 0.80), location: 1)],
+            startPoint: .topLeading, endPoint: .bottomTrailing)
+        // Optional 4th argument "frosted" renders the pre-macOS-26 path for comparison.
+        fv.forceFrosted = i + 3 < args.count && args[i + 3] == "frosted"
+        guard renderOnScreen(fv.padding(28).background(backdrop), to: out) else { print("render failed"); exit(1) }
         exit(0)
     }
 }
@@ -1926,6 +2172,7 @@ for (flag, rings) in [("--preview-popover-sel", false), ("--preview-float-rings-
         let image: CGImage?
         if rings {
             var fv = FloatingView(model: model)
+            fv.forceFrosted = true
             fv.forceCentre = "week"
             fv.forceStyle = "rings"
             fv.forceSel = sel
@@ -1944,6 +2191,34 @@ for (flag, rings) in [("--preview-popover-sel", false), ("--preview-float-rings-
         do { try png.write(to: URL(fileURLWithPath: out)) } catch { print("write failed: \(error)"); exit(1) }
         exit(0)
     }
+}
+
+// `--selftest-float-menu`: build the menu the floating gauge's right-click pops
+// up (same overlay wiring as showFloatingWindow) and print its item titles. No UI.
+if CommandLine.arguments.contains("--selftest-float-menu") {
+    MainActor.assumeIsolated {
+        _ = NSApplication.shared
+        let controller = AppController()
+        let overlay = DragOverlayView(frame: NSRect(x: 0, y: 0, width: 100, height: 100))
+        overlay.menuProvider = { controller.buildContextMenu() }
+        guard let menu = overlay.makeContextMenu() else { print("no menu"); exit(1) }
+        for item in menu.items { print(item.isSeparatorItem ? "---" : item.title) }
+        exit(0)
+    }
+}
+
+// `--selftest-centre-fit`: for 1, 2 and 3 rings print the number stack's size
+// (worst case "100") against the clear hole inside the innermost stroke.
+if CommandLine.arguments.contains("--selftest-centre-fit") {
+    for (count, fonts, hole) in [(1, [CGFloat(22)], CGFloat(90)), (2, [19, 13], 66), (3, [19, 15, 12], 42)] {
+        let texts = Array(repeating: "100", count: count)
+        let scale = FloatingView.centreScale(texts: texts, fonts: fonts, hole: hole)
+        let w = (0..<count).map { OutlinedNumber.textWidth("100", size: fonts[$0] * scale) }.max() ?? 0
+        let h = fonts.reduce(0) { $0 + $1 * 0.70 * scale } + CGFloat(count - 1) * scale
+        print(String(format: "rings=%d hole=%.0f scale=%.3f stack=%.1f x %.1f limit=%.1f fits=%@",
+                     count, hole, scale, w, h, 0.8 * hole, (w <= 0.8 * hole && h <= 0.8 * hole) ? "yes" : "no"))
+    }
+    exit(0)
 }
 
 // `--selftest-gauges-menu <flags>`: print the right-click "Gauges" submenu
